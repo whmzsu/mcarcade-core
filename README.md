@@ -6,8 +6,8 @@
 - 主线 **v0.10**：**把官方 pxt 编译器内嵌进了核心**——拖 `.png` 卡带进去，当场编成 `binary.js` 再跑，
   不需要 PC 预热。也仍然可以直接加载现成的 `binary.js`。
 - 旧版 **v0.9**：只认 `.js`，`.png` 得先在 PC 上用 `tools/cart_build.js` 转换。
-- 更旧 **v0.8**：手写兼容层（直接吃 `.png`）。其 JS 运行时保留在 `legacy/v0.8/` 供参考，
-  预编译核心见 `out/mcarcade-core-0.8-*.zip`。
+- 更旧 **v0.8**：手写兼容层（直接吃 `.png`）。这套实现已从主线移出（v0.10 起官方 sim 是
+  唯一运行时），要跑请用预编译核心 `out/mcarcade-core-0.8-*.zip`，源码见 git 历史。
 
 ```
 RetroArch ── arcade_libretro.{dll,so} ──┬─ src/core.c       libretro 接口 + QuickJS 宿主 + 每帧抽干 microtask
@@ -47,7 +47,7 @@ makecode-arcade-core/
 │   ├── cart_build.js      卡带 PNG → binary.js（PC 端官方 pxtc 编译，与内嵌编译器产物逐字节一致）
 │   ├── fetch_ext.js       github: 扩展源码抓取（jsdelivr 镜像）
 │   ├── ppm2png.js         PPM → PNG（看自检出图）
-│   ├── lib/host.js        卡带编解码 + pxtc 调用封装（Node 侧，C 里有等价实现）
+│   ├── lib/cart.js        卡带解码：PNG 低位隐写 + 裸 JSON / LZMA（Node 侧，C 里有等价实现）
 │   └── dev/               开发期的探针脚本（Node 对照、QuickJS 性能、菜单自测等，见其 README）
 │       └── embed_probe/   内嵌编译器可行性探针（qjsrun.c + harness.js + 实测数据）
 ├── tests/
@@ -60,7 +60,6 @@ makecode-arcade-core/
 │   ├── gen_compiler_bundle.py  pxt_hack.js + target.json + runtime/compiler.js → pxt_compiler_bundle.h
 │   └── fetch_deps.py      首次拉第三方源码到 third_party/
 ├── third_party/           quickjs / miniz / lzma / libretro / pxt-sim（原样入库，clone 即可编译）
-├── legacy/v0.8/           旧手写运行时（js/*.js + 打包脚本；js_bundle.h 是产物，不入库）
 └── dist/                  只入库 arcade_libretro.info；dll/so 走 GitHub Releases
 ```
 

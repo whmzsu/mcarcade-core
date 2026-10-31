@@ -7,15 +7,10 @@
 |---|---|
 | `qjs_perf.js` | 在 Node 里用同一套 `runtime/*.js` + 官方 sim 跑游戏，验证 JS 层改动 |
 | `sim_run.js` | 只加载 `binary.js` 跑若干帧 → PPM，最快看 sim 层效果 |
-| `probe_pxt.js` | pxt 全局符号/API 探针（配合 `legacy/v0.8/js/pxt_shim.js`） |
 | `pxt_compile.js` | 不走 `cart_build.js`，手工调 pxtc 的最小样例 |
 | `build_pxt.js` | 早期"一次跑完编译 + 出图"的脚本 |
 | `pxt_probe.js` | 逐帧打印 sim 状态（帧号、精灵数、按键） |
 | `batch_test.sh` | 批量跑一批卡带并汇总非黑像素数 |
-| `cart_audit.js` | 卡带批量体检（源码文件数、依赖、体积） |
-| `menu_test.js` | v0.8 系统暂停菜单自测（跑 `legacy/v0.8/js/arcade.js`） |
-| `probe_game.js` / `probe_keys.js` / `run_node.js` | v0.8 时代的 Node 端跑帧工具 |
-| `gen_menu_assets.py` | 从 pxt 官方资源重新导出 `legacy/v0.8/js/menu_assets.js` |
 | `mkpng.py` | 卡带编解码（`decode` 拆出工程，`from-share` 用分享 ID 造卡带） |
 | `ppm_probe.py` | PPM 统计（非黑像素、色数、区域差分） |
 | `qjsbench.c` / `qjs_eval.c` | QuickJS 命令行小工具（性能基准 / 单文件 eval） |
@@ -25,3 +20,10 @@
 
 **日常用不到的**：`cart_build.js`、`ppm2png.js`、`setup_pxtc.js` 在上级 `tools/`，
 那是正式工具链。
+
+## 已移出
+
+v0.8 手写运行时那一套（`legacy/v0.8/`，加上 `lib/host.js`、`menu_test.js`、`probe_game.js`、
+`probe_keys.js`、`run_node.js`、`cart_audit.js`、`probe_pxt.js`、`gen_menu_assets.py`）
+已在 v0.10 从主线移除：v0.9 起官方 sim 是唯一运行时，那套代码只剩"pxt 语义在 JS 里怎么实现"
+的阅读价值。要跑 v0.8 请用 `out/mcarcade-core-0.8-*.zip`，源码从 git 历史取。

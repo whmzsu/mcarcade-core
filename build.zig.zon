@@ -13,7 +13,6 @@
         "tests",
         "third_party",
         "tools",
-        "legacy",
         "README.md",
         "NOTICE.md",
         "LICENSE",
