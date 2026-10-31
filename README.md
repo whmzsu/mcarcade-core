@@ -6,7 +6,9 @@
 在 RetroArch 里玩 MakeCode Arcade 的卡带。不模拟硬件，直接在 QuickJS 里跑**官方 pxt runtime**
 （`pxtsim.js` + `common-sim.js` + `sim.js`），游戏语义与 makecode.com 浏览器里跑的是同一份代码。
 
-- 主线 **v0.15**：**精灵绘制 C 化**——drawImage/drawTransparentImage 每帧几十次的
+- 主线 **v0.15.1**：性能日志增强——启动日志带上卡带文件名（`game booted: xxx.js`），
+  `Performance Stats` 行尾追加 `native blit` 每帧次数/回退次数/耗时，远程排查时不用再猜
+  是哪个游戏、C 快路有没有生效。v0.15：**精灵绘制 C 化**——drawImage/drawTransparentImage 每帧几十次的
   逐像素 JS 循环改成 C 侧整块 memcpy/跳 0 拷贝，画面逐字节一致，精灵多的游戏每帧
   再省 3ms 上下。v0.14：音频合成提速——旧版每 1/44100 秒都要把旋律段表从头扫一遍、
   逐采样调 Math.sin/Math.exp；新版段表游标只前进、波形查表、包络增量递推，
@@ -280,12 +282,14 @@ Xbox 型手柄（按位置映射，标签与实际相反）用核心选项一键
 `快速菜单 → 核心选项 → Performance Stats = enabled`，日志里每 2 秒会出现一行：
 
 ```
-[arcade] perf: step 8.6ms present 0.0ms audio 0.1ms total 8.7ms (budget 16.7)
+[arcade] perf: step 8.6ms present 0.0ms audio 0.1ms total 8.7ms (budget 16.7) blit 85/t fb 0 0.02ms
 ```
 
 - `step`：游戏逻辑（QuickJS 跑官方 sim + 你的游戏代码），这是唯一会「慢」的部分
 - `present`：取画面 + 转成 XRGB8888（v0.12 起走零拷贝，正常情况下 0.x ms）
 - `audio`：音频合成（约 735 采样/帧）
+- `blit` / `fb`（v0.15.1 起）：每帧走 C 快路搬精灵的次数 / 因结构不符回退 JS 的次数，
+  以及 C 侧搬运总耗时；`fb` 一直非 0 说明该游戏的画法没走快路，可反馈
 - `total` 超过 16.7 就会掉帧。弱机（RK3566 / A55 @1.8GHz）上 `step` 大约是桌面 x86 的 3~4 倍
 
 设备上首次加载 `.png` 慢（30 秒以上）是**编译**耗时，和每帧性能无关：编完会进编译缓存，
