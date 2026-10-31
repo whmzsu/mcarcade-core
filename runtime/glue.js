@@ -70,6 +70,7 @@
       // 音频时钟对齐 + 清空上一局的音源
       if (typeof __audioReset === "function") __audioReset();
       rt.run(function () { /* 顶层代码结束 */ });
+      headlessBoard(rt);
       state.booted = true;
       return "";
     } catch (e) {
@@ -79,9 +80,105 @@
     }
   };
 
+  /* 无头环境下的纯浪费：gameplayer.draw 每帧 new ImageData(160x120)（76KB 垃圾）
+     再把整个屏缓冲拷进 mock canvas，只为渲染一个没人看的 DOM。
+     画面我们直接从 screenState.screen 取（arcade_fb32），这一步纯属白烧。 */
+  function headlessBoard(rt) {
+    if (typeof __arcade_legacy !== "undefined" && __arcade_legacy) return;
+    var b = rt && rt.board;
+    if (!b) return;
+    var gp = b.gameplayer;
+    if (gp) gp.draw = function () {};
+    fastImageOps();
+    profInstall();
+  }
+
+  /* ---- 函数级热点统计（ARCADE_JS_PROFILE=1 时启用，设备排查用） ---- */
+  var prof = null, profFrames = 0;
+
+  function profInstall() {
+    if (prof) return;
+    if (typeof __arcade_jsprof === "undefined" || !__arcade_jsprof) return;
+    prof = { items: [] };
+    var groups = [pxsim.ImageMethods, pxsim.pxtrt];
+    for (var gi = 0; gi < groups.length; gi++) {
+      var im = groups[gi];
+      if (!im) continue;
+      var keys = Object.keys(im);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i], f = im[k];
+        if (typeof f !== "function") continue;
+        var item = { name: (gi ? "pxtrt." : "") + k, n: 0, us: 0 };
+        prof.items.push(item);
+        im[k] = (function (f, item) {
+          return function () {
+            var t = __native_now();
+            try { return f.apply(this, arguments); }
+            finally { item.n++; item.us += __native_now() - t; }
+          };
+        })(f, item);
+      }
+    }
+  }
+
+  function profDump() {
+    function top(cmp, n) {
+      var items = prof.items.slice(0).sort(cmp), out = [];
+      for (var i = 0; i < items.length && out.length < n; i++) {
+        var it = items[i];
+        if (!it.n) continue;
+        out.push(it.name + " " + (it.us / profFrames / 1000).toFixed(2) + "ms x" +
+                 (it.n / profFrames).toFixed(0));
+      }
+      return out.join(" | ");
+    }
+    try {
+      __native_log("prof", "时间: " + top(function (a, b) { return b.us - a.us; }, 8));
+      __native_log("prof", "次数: " + top(function (a, b) { return b.n - a.n; }, 8));
+    } catch (e) {}
+  }
+
+  /* 逐像素 API 是 sim 里调用最频繁的入口：arcade 运行时画对话框/粒子/文字遮罩
+     时每帧几千次（实测 cube-land 每帧 ~2600 次 setPixel + ~2600 次 getPixel）。
+     原实现每像素要穿 4 层函数（makeWritable / inRange / pix / color），解释执行
+     下每层都是几十纳秒，设备上就是每帧十几毫秒。这里内联成 1 层。 */
+  function fastImageOps() {
+    if (typeof __arcade_noFastOps !== "undefined" && __arcade_noFastOps) return;
+    var im = pxsim.ImageMethods;
+    var proto = pxsim.RefImage && pxsim.RefImage.prototype;
+    if (!im || !proto) return;
+    var defColor = proto.color;
+    var defWritable = proto.makeWritable;
+
+    im.setPixel = function (img, x, y, c) {
+      x |= 0; y |= 0;
+      var w = img._width;
+      if (x < 0 || y < 0 || x >= w || y >= img._height) return;
+      if (img.makeWritable === defWritable) {
+        img.revision++;
+        img.isStatic = false;
+      } else {
+        img.makeWritable();
+      }
+      img.data[x + y * w] = (img.color === defColor) ? (c & 0xff) : img.color(c);
+    };
+
+    im.getPixel = function (img, x, y) {
+      x |= 0; y |= 0;
+      var w = img._width;
+      if (x < 0 || y < 0 || x >= w || y >= img._height) return 0;
+      return img.data[x + y * w];
+    };
+  }
+
   globalThis.arcade_step = function (dt) {
     try {
-      return __pump(1);
+      var r = __pump(1);
+      if (prof) {
+        profFrames++;
+        if (profFrames === 300) profDump();
+      }
+      return r;
     } catch (e) {
       try { __native_log("error", "step: " + errText(e)); } catch (e2) {}
       return -1;
@@ -126,6 +223,12 @@
     if (s.length < 160 * 120) return null;
     return s;
   };
+
+  /* 更快的取帧（曾经试过：直接读 lastImage 的 8bpp 索引图 + 调色板，让 C 展开）。
+     实测屏幕开销已经很低（19200 次简单循环在解释器里也就 0.1ms 量级），而 lastImage
+     是「活动缓冲」，和 screenState.screen（刷屏那一刻的快照）不是同一时刻的画面，
+     读它会和真实显示差一列像素（cube-land 的对话框精灵就撞上了）。收益不值风险，
+     所以取帧统一走 screenState.screen（arcade_fb32）。 */
 
   globalThis.arcade_set_button = function (name, down) {
     try {

@@ -12,6 +12,11 @@
  */
 var __timers = [], __intervals = {}, __tid = 0, __now = 1000;
 var __lastPump = Date.now();
+/* >0：虚拟时钟按固定步长推进，完全不看墙钟。给自检/性能基准用——墙钟驱动
+ * 时 JS 慢一点 dt 就变大，pxt 会追帧，同一张卡带的每帧工作量会漂，
+ * 量出来的耗时没有可比性。设备上是 0（真实时间）。 */
+var __fixedStep = 0;
+function __setFixedStep(ms) { __fixedStep = ms | 0; }
 function setTimeout(fn, ms) { __timers.push({ t: __now + (ms || 0), fn: fn }); return ++__tid; }
 function clearTimeout(id) {}
 function setInterval(fn, ms) { __intervals[++__tid] = { fn: fn, ms: (ms || 0), next: __now + (ms || 0) }; return __tid; }
@@ -19,12 +24,17 @@ function clearInterval(id) { delete __intervals[id]; }
 function requestAnimationFrame(fn) { __timers.push({ t: __now + 16.6667, fn: fn }); return ++__tid; }
 function cancelAnimationFrame(id) {}
 function __pump(n) {
-  var wall = Date.now();
-  var dt = wall - __lastPump;
-  if (dt < 0) dt = 0;
-  if (dt > 200) dt = 200;
-  __lastPump = wall;
-  __now += dt;
+  if (__fixedStep) {
+    __now += __fixedStep;
+    __lastPump = Date.now();
+  } else {
+    var wall = Date.now();
+    var dt = wall - __lastPump;
+    if (dt < 0) dt = 0;
+    if (dt > 200) dt = 200;
+    __lastPump = wall;
+    __now += dt;
+  }
   var ran = 0, guard = 0;
   for (;;) {
     var best = -1;

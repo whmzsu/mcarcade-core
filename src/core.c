@@ -1,5 +1,5 @@
 /*
- * core.c —— libretro 核心实现（v0.12：取帧零拷贝 + 性能统计）
+ * core.c —— libretro 核心实现（v0.13：逐像素快路径 + 无头渲染裁剪）
  *
  * 两种内容都能直接加载：
  *   .png  MakeCode Arcade 卡带 —— 卡带里是 TypeScript 工程，由内嵌的官方 pxt 编译器
@@ -186,6 +186,16 @@ static int audio_render(int max_frames)
 
 /* ---------------- JS 原生回调 ---------------- */
 
+static double now_ms(void);   /* 定义在下面（性能统计那段） */
+
+/* ARCADE_LEGACY_PRESENT=1 时退回 v0.12 的取帧/渲染路径，用来逐字节对比输出 */
+static int legacy_present(void)
+{
+    static int v = -1;
+    if (v < 0) v = getenv("ARCADE_LEGACY_PRESENT") ? 1 : 0;
+    return v;
+}
+
 static JSValue js_native_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     (void)this_val;
@@ -195,6 +205,13 @@ static JSValue js_native_log(JSContext *ctx, JSValueConst this_val, int argc, JS
     if (lvl) JS_FreeCString(ctx, lvl);
     if (msg) JS_FreeCString(ctx, msg);
     return JS_UNDEFINED;
+}
+
+static JSValue js_native_now(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    /* 微秒级时钟：Date.now 只有毫秒，量不出单次绘制/单帧里的小项 */
+    return JS_NewFloat64(js_ctx, now_ms() * 1000.0);
 }
 
 static JSValue js_native_tone(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
@@ -239,6 +256,23 @@ static int js_boot_impl(const char *source)
         if (err) JS_FreeCString(js_ctx, err);
     }
     JS_FreeValue(js_ctx, ret);
+    if (ok) {
+        /* 自检/基准用：把 pxt 的虚拟时钟钉成固定步长（设备上不设，走真实时间）。
+           墙钟驱动时 JS 慢一点 dt 就变大、pxt 追帧，每帧工作量会漂，耗时没可比性。 */
+        const char *fd = getenv("ARCADE_FIXED_DT");
+        if (fd && *fd) {
+            JSValue g = JS_GetGlobalObject(js_ctx);
+            JSValue f = JS_GetPropertyStr(js_ctx, g, "__setFixedStep");
+            if (JS_IsFunction(js_ctx, f)) {
+                JSValue a = JS_NewInt32(js_ctx, atoi(fd));
+                JSValue r = JS_Call(js_ctx, f, JS_UNDEFINED, 1, &a);
+                JS_FreeValue(js_ctx, r);
+                JS_FreeValue(js_ctx, a);
+            }
+            JS_FreeValue(js_ctx, f);
+            JS_FreeValue(js_ctx, g);
+        }
+    }
     return ok;
 }
 
@@ -250,16 +284,31 @@ static int js_init(void)
     JS_SetMemoryLimit(js_rt, 192u << 20);
     /* CPS 转换后的游戏代码递归较深，qjs_perf 验证用 4MB 栈 */
     JS_SetMaxStackSize(js_rt, 4u << 20);
+    /* GC 阈值可调（ARCADE_GC_KB，0/未设为 QuickJS 默认）。低端设备上默认阈值
+       偏小，堆一涨就回收，可以适当地抬高，由内存上限兜底。 */
+    {
+        const char *gck = getenv("ARCADE_GC_KB");
+        if (gck && atoi(gck) > 0) JS_SetGCThreshold(js_rt, (size_t)atoi(gck) << 10);
+    }
     js_ctx = JS_NewContext(js_rt);
     if (!js_ctx) return 0;
 
     JSValue global = JS_GetGlobalObject(js_ctx);
     JS_SetPropertyStr(js_ctx, global, "__native_log",
                       JS_NewCFunction(js_ctx, js_native_log, "__native_log", 2));
+    JS_SetPropertyStr(js_ctx, global, "__native_now",
+                      JS_NewCFunction(js_ctx, js_native_now, "__native_now", 0));
     JS_SetPropertyStr(js_ctx, global, "__native_tone",
                       JS_NewCFunction(js_ctx, js_native_tone, "__native_tone", 2));
     JS_SetPropertyStr(js_ctx, global, "__native_stop_audio",
                       JS_NewCFunction(js_ctx, js_native_stop_audio, "__native_stop_audio", 0));
+    /* A/B 开关：关掉 sim 的逐像素快路径，量基线用（设备排查也能用） */
+    if (getenv("ARCADE_NO_FASTOPS"))
+        JS_SetPropertyStr(js_ctx, global, "__arcade_noFastOps", JS_NewBool(js_ctx, 1));
+    if (legacy_present())
+        JS_SetPropertyStr(js_ctx, global, "__arcade_legacy", JS_NewBool(js_ctx, 1));
+    if (getenv("ARCADE_JS_PROFILE"))
+        JS_SetPropertyStr(js_ctx, global, "__arcade_jsprof", JS_NewBool(js_ctx, 1));
     JS_FreeValue(js_ctx, global);
 
     JSValue r = JS_Eval(js_ctx, (const char *)pxt_bundle, pxt_bundle_len, "pxt_bundle.js", JS_EVAL_TYPE_GLOBAL);
@@ -455,7 +504,7 @@ EXPORT void retro_get_system_info(struct retro_system_info *info)
 {
     memset(info, 0, sizeof(*info));
     info->library_name = "MakeCode Arcade (official runtime)";
-    info->library_version = "0.12";
+    info->library_version = "0.13";
     info->valid_extensions = "js|png";
     info->need_fullpath = false;
     info->block_extract = true;
