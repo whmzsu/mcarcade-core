@@ -1,5 +1,5 @@
 /*
- * core.c —— libretro 核心实现（v0.14：音频合成游标化 + 波形查表）
+ * core.c —— libretro 核心实现（v0.15：精灵绘制 C 化）
  *
  * 两种内容都能直接加载：
  *   .png  MakeCode Arcade 卡带 —— 卡带里是 TypeScript 工程，由内嵌的官方 pxt 编译器
@@ -232,6 +232,87 @@ static JSValue js_native_stop_audio(JSContext *ctx, JSValueConst this_val, int a
     return JS_UNDEFINED;
 }
 
+/* ---- 精灵批量绘制：sim 的 drawImageCore 逐像素解释执行，jumpy 每帧 85 次
+ * 精灵 blit 在设备上要 3ms 上下。这里把整块像素搬运挪到 C：dst/src 的
+ * data(Uint8Array) 解一次包，然后整行 memcpy（drawImage）或跳 0 拷贝
+ * （drawTransparentImage）。任何一步取不到结构就返回 -1，JS 侧回退原实现。 ---- */
+
+static int img_data_of(JSContext *ctx, JSValueConst img, uint8_t **data, size_t *len)
+{
+    JSValue d = JS_GetPropertyStr(ctx, img, "data");
+    if (JS_IsException(d) || !JS_IsObject(d)) {
+        JS_FreeValue(ctx, d);
+        return -1;
+    }
+    size_t off = 0, blen = 0, bpe = 0;
+    JSValue ab = JS_GetTypedArrayBuffer(ctx, d, &off, &blen, &bpe);
+    JS_FreeValue(ctx, d);
+    if (JS_IsException(ab)) {
+        JS_FreeValue(ctx, ab);
+        return -1;
+    }
+    size_t alen = 0;
+    uint8_t *p = JS_GetArrayBuffer(ctx, &alen, ab);
+    JS_FreeValue(ctx, ab);
+    if (!p) return -1;
+    *data = p + off;
+    *len = blen;
+    return 0;
+}
+
+static int img_int_of(JSContext *ctx, JSValueConst img, const char *key)
+{
+    int32_t v = -1;
+    JSValue jv = JS_GetPropertyStr(ctx, img, key);
+    if (!JS_IsException(jv)) JS_ToInt32(ctx, &v, jv);
+    JS_FreeValue(ctx, jv);
+    return v;
+}
+
+static JSValue js_native_blit(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)this_val;
+    /* argv: dst, src, x, y, clear —— 语义与 sim.js drawImageCore 一致
+     * （clear=1：区域最终等于 src 内容；clear=0：跳过 0 的透明拷贝） */
+    if (argc < 5 || !JS_IsObject(argv[0]) || !JS_IsObject(argv[1]))
+        return JS_NewInt32(ctx, -1);
+    int x = 0, y = 0, clear = 0;
+    JS_ToInt32(ctx, &x, argv[2]);
+    JS_ToInt32(ctx, &y, argv[3]);
+    JS_ToInt32(ctx, &clear, argv[4]);
+
+    uint8_t *dd, *sd;
+    size_t dl, sl;
+    if (img_data_of(ctx, argv[0], &dd, &dl) || img_data_of(ctx, argv[1], &sd, &sl))
+        return JS_NewInt32(ctx, -1);
+    int dw = img_int_of(ctx, argv[0], "_width"), dh = img_int_of(ctx, argv[0], "_height");
+    int sw = img_int_of(ctx, argv[1], "_width"), sh = img_int_of(ctx, argv[1], "_height");
+    if (dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0)
+        return JS_NewInt32(ctx, -1);
+    if ((size_t)dw * dh > dl || (size_t)sw * sh > sl)
+        return JS_NewInt32(ctx, -1);   /* 结构对不上，宁可回退也别写坏 */
+
+    /* 裁剪到 dst 范围 */
+    int sx = 0, sy = 0;
+    if (x < 0) { sx = -x; x = 0; }
+    if (y < 0) { sy = -y; y = 0; }
+    int cols = sw - sx; if (x + cols > dw) cols = dw - x;
+    int rows = sh - sy; if (y + rows > dh) rows = dh - y;
+    if (cols <= 0 || rows <= 0)
+        return JS_NewInt32(ctx, 1);    /* 完全在界外，无事可做 */
+
+    for (int r = 0; r < rows; r++) {
+        uint8_t *d = dd + (size_t)(y + r) * dw + x;
+        const uint8_t *s = sd + (size_t)(sy + r) * sw + sx;
+        if (clear)
+            memcpy(d, s, (size_t)cols);
+        else
+            for (int c = 0; c < cols; c++)
+                if (s[c]) d[c] = s[c];
+    }
+    return JS_NewInt32(ctx, 1);
+}
+
 /* ---------------- 初始化 ---------------- */
 
 static int js_boot_impl(const char *source)
@@ -298,6 +379,8 @@ static int js_init(void)
                       JS_NewCFunction(js_ctx, js_native_log, "__native_log", 2));
     JS_SetPropertyStr(js_ctx, global, "__native_now",
                       JS_NewCFunction(js_ctx, js_native_now, "__native_now", 0));
+    JS_SetPropertyStr(js_ctx, global, "__native_blit",
+                      JS_NewCFunction(js_ctx, js_native_blit, "__native_blit", 5));
     JS_SetPropertyStr(js_ctx, global, "__native_tone",
                       JS_NewCFunction(js_ctx, js_native_tone, "__native_tone", 2));
     JS_SetPropertyStr(js_ctx, global, "__native_stop_audio",
@@ -504,7 +587,7 @@ EXPORT void retro_get_system_info(struct retro_system_info *info)
 {
     memset(info, 0, sizeof(*info));
     info->library_name = "MakeCode Arcade (official runtime)";
-    info->library_version = "0.14";
+    info->library_version = "0.15";
     info->valid_extensions = "js|png";
     info->need_fullpath = false;
     info->block_extract = true;

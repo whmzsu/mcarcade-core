@@ -139,9 +139,9 @@
   }
 
   /* 逐像素 API 是 sim 里调用最频繁的入口：arcade 运行时画对话框/粒子/文字遮罩
-     时每帧几千次（实测 cube-land 每帧 ~2600 次 setPixel + ~2600 次 getPixel）。
-     原实现每像素要穿 4 层函数（makeWritable / inRange / pix / color），解释执行
-     下每层都是几十纳秒，设备上就是每帧十几毫秒。这里内联成 1 层。 */
+     时每帧几千次。原实现每像素要穿 4 层函数（makeWritable / inRange / pix /
+     color），解释执行下每层都是几十纳秒。setPixel/getPixel 内联成 1 层；
+     精灵 blit（drawImage/drawTransparentImage，jumpy 每帧 85 次）整块搬到 C。 */
   function fastImageOps() {
     if (typeof __arcade_noFastOps !== "undefined" && __arcade_noFastOps) return;
     var im = pxsim.ImageMethods;
@@ -149,6 +149,8 @@
     if (!im || !proto) return;
     var defColor = proto.color;
     var defWritable = proto.makeWritable;
+    var origDrawImage = im.drawImage;
+    var origDrawTransparent = im.drawTransparentImage;
 
     im.setPixel = function (img, x, y, c) {
       x |= 0; y |= 0;
@@ -169,6 +171,26 @@
       if (x < 0 || y < 0 || x >= w || y >= img._height) return 0;
       return img.data[x + y * w];
     };
+
+    /* 语义与 sim.js drawImageCore 对齐：drawImage = fillRect(0) + 写非零像素
+     * ⇒ 目标区域最终等于 src（含 0）；drawTransparentImage = 跳 0 拷贝。
+     * C 侧结构取不到时返回非 1，回退原实现。 */
+    if (typeof __native_blit === "function") {
+      im.drawImage = function (dst, src, x, y) {
+        if (dst.makeWritable === defWritable) { dst.revision++; dst.isStatic = false; }
+        else dst.makeWritable();
+        if (__native_blit(dst, src, x | 0, y | 0, 1) !== 1)
+          return origDrawImage(dst, src, x, y);
+        return false;
+      };
+      im.drawTransparentImage = function (dst, src, x, y) {
+        if (dst.makeWritable === defWritable) { dst.revision++; dst.isStatic = false; }
+        else dst.makeWritable();
+        if (__native_blit(dst, src, x | 0, y | 0, 0) !== 1)
+          return origDrawTransparent(dst, src, x, y);
+        return false;
+      };
+    }
   }
 
   globalThis.arcade_step = function (dt) {
