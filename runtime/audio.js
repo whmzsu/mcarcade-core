@@ -38,6 +38,20 @@
 
   function now() { return typeof __now === "number" ? __now : 0; }
 
+  // ---------- 渲染 ----------
+  // 性能关键路径（设备上 audio 占过 5.4ms/帧，主要浪费在：
+  //  1) 每个采样都 segAt 线性扫描旋律段数组 → 改为游标推进，每段只走一次
+  //  2) 每采样 Math.exp（包络）/ Math.sin（正弦）→ 增量包络 + 查表
+  //  3) 每帧 new Int16Array → 复用缓冲
+  var MSPS = 1000 / SR;                       // 每采样毫秒数
+  var gk = Math.exp(-MSPS / TC_MS);           // tone 包络每采样衰减因子
+  var SIN_N = 4096, SIN_MASK = SIN_N - 1;
+  var SIN = new Float32Array(SIN_N);
+  for (var si = 0; si < SIN_N; si++) SIN[si] = Math.sin(2 * Math.PI * si / SIN_N);
+  var mixBuf = new Float32Array(SR / 10 | 0); // 混音缓冲（复用）
+  var outBuf = null;                          // 输出缓冲（复用）
+  var EMPTY = new Int16Array(0);
+
   function noise() {
     // xorshift32 → [-1, 1)
     rngState ^= rngState << 13; rngState >>>= 0;
@@ -46,19 +60,125 @@
     return (rngState / 0x7fffffff) - 1;
   }
 
-  function scaleVol(n, isSquare) { return (n / 1024 / 4) * (isSquare ? 0.5 : 1); }
+  function toneGainAt(v, tMs) {
+    var dt = tMs - v.gt;
+    if (dt <= 0) return v.g;
+    return v.target + (v.g - v.target) * Math.exp(-dt / TC_MS);
+  }
+
+  // tone 音色：单音，包络按每采样 gk 递推（与 exp 解析式等价的离散近似）
+  function renderTone(v, n) {
+    var t = acur;
+    var g = toneGainAt(v, t);            // 原始包络（未乘 0.35）
+    var tgt = v.target;
+    var ph = v.phase;
+    var inc = v.freq / SR;
+    var end = v.end === null ? Infinity : v.end;
+    for (var i = 0; i < n; i++) {
+      if (t >= v.start && t < end) {
+        var p = ph - Math.floor(ph);
+        var w = p < 0.5 ? 1 - 4 * p : 4 * p - 3;          // triangle（[-1,1]，等价 2|2p-1|-1）
+        mixBuf[i] += w * g * 0.35;
+      }
+      g = tgt + (g - tgt) * gk;
+      ph += inc;
+      t += MSPS;
+    }
+    v.g = g; v.gt = acur + n * MSPS; v.phase = ph;
+  }
+
+  // 指令音源：游标只前进不回扫；段间空隙整块跳过
+  function renderInstr(v, n) {
+    var segs = v.segs;
+    var end = v.end === null ? Infinity : v.end;
+    var si = v.curSeg | 0;
+    if (si >= segs.length || acur < segs[si].t0) si = 0;   // 时钟回退/新声源
+    var t = acur;
+    var ph = v.phase;
+    var i = 0;
+    while (i < n) {
+      if (t >= end) { i = n; break; }
+      if (t < v.start) {                     // 还没开始：跳到开始
+        var skip0 = Math.ceil((v.start - t) / MSPS);
+        if (skip0 > n - i) break;
+        i += skip0; t += skip0 * MSPS;
+        continue;
+      }
+      var seg = null;
+      while (si < segs.length) {
+        var s = segs[si];
+        if (t < s.t1) { if (t >= s.t0) seg = s; break; }
+        si++;
+      }
+      if (!seg) {                            // 段间休止：跳到下一段起点或本帧末尾
+        var next = si < segs.length ? segs[si].t0 : Infinity;
+        var lim = next < end ? next : end;
+        var skip = Math.ceil((lim - t) / MSPS);
+        if (skip <= 0) skip = 1;
+        if (skip > n - i) { i = n; break; }
+        i += skip; t += skip * MSPS;
+        continue;
+      }
+      // 段内：频率/音量线性斜坡，波形查表/内联
+      var span = seg.t1 - seg.t0;
+      var fdf = (seg.f1 - seg.f0) / (span / MSPS);   // 每采样频率增量
+      var vdf = (seg.v1 - seg.v0) / (span / MSPS);
+      var f = seg.f0 + (t - seg.t0) * (seg.f1 - seg.f0) / span;
+      var vol = seg.v0 + (t - seg.t0) * (seg.v1 - seg.v0) / span;
+      var wave = seg.wave, duty = seg.duty;
+      var segEnd = seg.t1 < end ? seg.t1 : end;
+      while (i < n && t < segEnd) {
+        var p = ph - Math.floor(ph);
+        var w;
+        if (wave === 1) w = p < 0.5 ? 1 - 4 * p : 4 * p - 3;         // triangle
+        else if (wave === 2) w = 2 * p - 1;                          // sawtooth
+        else if (wave === 3) w = SIN[(p * SIN_N) & SIN_MASK];        // sine 查表
+        else if (wave >= 11 && wave <= 15) w = p < duty ? 1 : -1;    // 方波
+        else w = noise();                                            // 噪声类
+        mixBuf[i] += w * vol;
+        ph += f / SR;
+        f += fdf;
+        vol += vdf;
+        i++; t += MSPS;
+      }
+      if (ph > 1e6) ph -= Math.floor(ph);
+    }
+    v.curSeg = si;
+    v.phase = ph;
+  }
+
+  // C 侧每帧调用：渲染 (当前虚拟时间 - acur) 的采样
+  globalThis.arcade_audio = function () {
+    var target = now();
+    var n = Math.floor((target - acur) * SR / 1000);
+    var cap = SR / 10 | 0;                     // 单帧最多 100ms，防卡顿后爆发
+    if (n > cap) n = cap;
+    if (n <= 0) return EMPTY;
+    for (var i = 0; i < n; i++) mixBuf[i] = 0;
+    for (var vi = voices.length - 1; vi >= 0; vi--) {
+      var v = voices[vi];
+      if (v.end !== null && target >= v.end) {
+        if (v.kind === "instr") voices.splice(vi, 1);
+        continue;
+      }
+      if (v.kind === "tone") renderTone(v, n);
+      else renderInstr(v, n);
+    }
+    if (!outBuf || outBuf.length < n) outBuf = new Int16Array(cap);
+    for (var j = 0; j < n; j++) {
+      var s = mixBuf[j];
+      if (s > 1) s = 1; else if (s < -1) s = -1;
+      outBuf[j] = (s * 32767) | 0;
+    }
+    acur += n * MSPS;
+    return outBuf.subarray(0, n);
+  };
 
   function u16(buf, off) { return buf[off] | (buf[off + 1] << 8); }
 
   // ---------- 音源 ----------
   // tone 音色（单例）：三角波，gain 走 15ms setTarget 包络
   var toneV = null;
-
-  function toneGainAt(v, tMs) {
-    var dt = tMs - v.gt;
-    if (dt <= 0) return v.g;
-    return v.target + (v.g - v.target) * Math.exp(-dt / TC_MS);
-  }
 
   function ensureTone() {
     if (!toneV) {
@@ -79,73 +199,7 @@
     return v;
   }
 
-  function segAt(v, tMs) {
-    var segs = v.segs;
-    for (var i = 0; i < segs.length; i++) {
-      if (tMs >= segs[i].t0 && tMs < segs[i].t1) return segs[i];
-    }
-    return null;
-  }
-
-  function waveValue(wave, phase, duty) {
-    var p = phase - Math.floor(phase);
-    switch (wave) {
-      case 1: return 2 * Math.abs(2 * p - 1) - 1;                 // triangle
-      case 2: return 2 * p - 1;                                   // sawtooth
-      case 3: return Math.sin(2 * Math.PI * p);                   // sine
-      default:
-        if (wave >= 11 && wave <= 15) return p < duty ? 1 : -1;   // 方波
-        return noise();                                           // 噪声类
-    }
-  }
-
-  // ---------- 渲染 ----------
-  function synthSample(tMs) {
-    var s = 0;
-    for (var i = voices.length - 1; i >= 0; i--) {
-      var v = voices[i];
-      if (v.end !== null && tMs >= v.end) {
-        if (v.kind === "instr") voices.splice(i, 1);
-        continue;
-      }
-      if (tMs < v.start) continue;
-      var w, g;
-      if (v.kind === "tone") {
-        w = waveValue(1, v.phase, 0.5);
-        g = toneGainAt(v, tMs) * 0.35;
-        v.phase += v.freq / SR;
-      } else {
-        var seg = segAt(v, tMs);
-        if (!seg) { v.phase += 0; continue; }
-        var f = seg.t1 > seg.t0 ? seg.f0 + (seg.f1 - seg.f0) * (tMs - seg.t0) / (seg.t1 - seg.t0) : seg.f1;
-        var vol = seg.t1 > seg.t0 ? seg.v0 + (seg.v1 - seg.v0) * (tMs - seg.t0) / (seg.t1 - seg.t0) : seg.v1;
-        w = waveValue(seg.wave, v.phase, seg.duty);
-        g = vol;
-        v.phase += f / SR;
-      }
-      // phase 归一防溢出
-      if (v.phase > 1e6) v.phase -= Math.floor(v.phase);
-      s += w * g;
-    }
-    if (s > 1) s = 1; else if (s < -1) s = -1;
-    return s;
-  }
-
-  // C 侧每帧调用：渲染 (当前虚拟时间 - acur) 的采样
-  globalThis.arcade_audio = function () {
-    var target = now();
-    var n = Math.floor((target - acur) * SR / 1000);
-    var cap = SR / 10 | 0;                     // 单帧最多 100ms，防卡顿后爆发
-    if (n > cap) n = cap;
-    if (n <= 0) return new Int16Array(0);
-    var out = new Int16Array(n);
-    for (var i = 0; i < n; i++) {
-      var t = acur + i * 1000 / SR;
-      out[i] = (synthSample(t) * 32767) | 0;
-    }
-    acur += n * 1000 / SR;
-    return out;
-  };
+  function scaleVol(n, isSquare) { return (n / 1024 / 4) * (isSquare ? 0.5 : 1); }
 
   // 启动/重置时对齐时钟、清空音源
   globalThis.__audioReset = function () {

@@ -1,5 +1,5 @@
 /*
- * core.c —— libretro 核心实现（v0.13：逐像素快路径 + 无头渲染裁剪）
+ * core.c —— libretro 核心实现（v0.14：音频合成游标化 + 波形查表）
  *
  * 两种内容都能直接加载：
  *   .png  MakeCode Arcade 卡带 —— 卡带里是 TypeScript 工程，由内嵌的官方 pxt 编译器
@@ -504,7 +504,7 @@ EXPORT void retro_get_system_info(struct retro_system_info *info)
 {
     memset(info, 0, sizeof(*info));
     info->library_name = "MakeCode Arcade (official runtime)";
-    info->library_version = "0.13";
+    info->library_version = "0.14";
     info->valid_extensions = "js|png";
     info->need_fullpath = false;
     info->block_extract = true;
