@@ -57,12 +57,20 @@ const ReleaseSpec = struct {
     out_name: []const u8,
     /// Android 目标需要 NDK（-Dndk=...），没给就跳过
     needs_ndk: bool = false,
+    /// 可选：按具体 CPU 型号调度（zig 的 -mcpu 语法，如 "cortex_a55"）。
+    /// RK3566/RK3326 这类顺序执行小核上收益明显（5~15%）；通用包保持 baseline，
+    /// 因为按 A55 编出的代码不能保证在更老的 v8.0 核心（A35 等）上能跑。
+    cpu: ?[]const u8 = null,
 };
 
 const RELEASE_TARGETS = [_]ReleaseSpec{
     .{ .triple = "x86_64-windows-gnu", .out_name = "arcade_libretro.dll" },
     .{ .triple = "x86_64-linux-gnu", .out_name = "arcade_libretro.so" },
     .{ .triple = "aarch64-linux-gnu", .out_name = "arcade_libretro_aarch64.so" },
+    // RK3566（ArkOS 常见机型）等 Cortex-A55 设备专用：按小核顺序执行管线调度。
+    // 名字不带 libretro 后缀，不会被 RetroArch 自动认领；要用的手动改名/软链成
+    // arcade_libretro.so。A35（RK3326）设备请用上面的通用包。
+    .{ .triple = "aarch64-linux-gnu", .out_name = "arcade_libretro_a55.so", .cpu = "cortex_a55" },
     .{ .triple = "aarch64-linux-android", .out_name = "arcade_libretro_android.so", .needs_ndk = true },
 };
 
@@ -190,8 +198,11 @@ fn installCore(
     ndk: ?Ndk,
     strip: bool,
 ) *std.Build.Step.InstallArtifact {
-    const q = std.Target.Query.parse(.{ .arch_os_abi = spec.triple }) catch |err| {
-        std.debug.panic("无法解析 target '{s}': {s}", .{ spec.triple, @errorName(err) });
+    const q = std.Target.Query.parse(.{
+        .arch_os_abi = spec.triple,
+        .cpu_features = spec.cpu,
+    }) catch |err| {
+        std.debug.panic("无法解析 target '{s}' (cpu={s}): {s}", .{ spec.triple, spec.cpu orelse "-", @errorName(err) });
     };
     const lib = addCore(b, b.resolveTargetQuery(q), optimize, bundle_dir, compiler_dir, ndk, strip);
     return b.addInstallArtifact(lib, .{
