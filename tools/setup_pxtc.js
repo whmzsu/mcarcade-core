@@ -30,11 +30,27 @@ const PKG = {
   dependencies: { "pxt-arcade": PXT_ARCADE, "pxt-core": PXT_CORE },
 };
 
-// 编译器载荷要用的两个文件，缺任何一个都编不出核心
+// 编译器载荷要用的文件，缺任何一个都编不出核心
 const REQUIRED = [
   ["pxt-core", "built/pxt_hack.js"],
+  ["pxt-core", "built/nodeutil.js"],
   ["pxt-arcade", "built/target.json"],
 ];
+
+// npm 上的 pxt-core 只发 built/pxt.js（CLI 入口），不导出 Host/SnippetHost。
+// gen_compiler_bundle.py 要拿这两个类在 QuickJS 里搭编译环境，所以得自己补：
+// pxt_hack.js = pxt.js + 尾部两行导出（实测 71 字节）。这是纯文本拼接，
+// 不需要 gulp/tsc——npm 包里本来也没有构建脚本。
+const HACK_TAIL =
+  "\nmodule.exports.Host = Host;\nmodule.exports.SnippetHost = SnippetHost;\n";
+
+function makePxtHack(coreDir) {
+  const pxt = path.join(coreDir, "built", "pxt.js");
+  const hack = path.join(coreDir, "built", "pxt_hack.js");
+  if (fs.existsSync(hack) || !fs.existsSync(pxt)) return;
+  fs.writeFileSync(hack, fs.readFileSync(pxt, "utf8") + HACK_TAIL);
+  console.log("  由 built/pxt.js 生成 built/pxt_hack.js");
+}
 
 fs.mkdirSync(BUILD_ROOT, { recursive: true });
 const pkgPath = path.join(BUILD_ROOT, "package.json");
@@ -62,6 +78,9 @@ for (const name of ["pxt-arcade", "pxt-core"]) {
     console.log(`  ${name} 未安装`);
   }
 }
+
+const coreDir = path.join(BUILD_ROOT, "node_modules", "pxt-core");
+makePxtHack(coreDir);
 
 const missing = [];
 for (const [pkg, rel] of REQUIRED) {
