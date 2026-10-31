@@ -85,6 +85,10 @@ makecode-arcade-core/
 依赖：**Zig 0.14+**（自带 clang，不需要系统 C 编译器）、**Python 3**、**Node + pxtc 环境**。
 不需要系统 zlib/lzma（全部 vendored）。
 
+`third_party/` 里的 QuickJS / miniz / lzma / libretro.h / pxt-sim 都是**原样入库**的，
+`git clone` 后直接能编，不用先联网拉依赖（`scripts/fetch_deps.py` 只在升级版本时用）。
+唯一的联网步骤是下面这行装 pxtc。
+
 ```bash
 # 内嵌编译器的载荷要从 pxtc 里取，编核心前先装一次（只影响构建，运行期不需要 Node）
 node tools/setup_pxtc.js          # → %TEMP%\pxtbuild；或用 -Dpxtbuild=<目录> 指别处
