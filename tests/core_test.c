@@ -60,6 +60,32 @@ static int g_every = 0;
 static const char *g_save_dir = NULL;
 /* 可选：--nocache 把核心选项 arcade_compile_cache 设成 disabled，验证开关真的生效 */
 static int g_cache_off = 0;
+/* 可选：--pace 按 60fps 节流（真实前端是 16.7ms 一帧；不节流跑得太快，
+ * 而 runtime 的定时器按真实时间触发，step 会被严重低估，性能数据不可信） */
+static int g_pace = 0;
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+static double wall_ms(void) { return (double)GetTickCount64(); }
+static void wall_sleep_ms(double ms) { if (ms > 0) Sleep((DWORD)(ms + 0.5)); }
+#else
+static double wall_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+static void wall_sleep_ms(double ms)
+{
+    if (ms <= 0) return;
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000.0);
+    ts.tv_nsec = (long)((ms - (double)ts.tv_sec * 1000.0) * 1e6);
+    nanosleep(&ts, NULL);
+}
+#endif
 
 static const char *g_wav_path = NULL;
 static short *g_wav = NULL;
@@ -200,6 +226,11 @@ static bool cb_environment(unsigned cmd, void *data)
             v->value = g_cache_off ? "disabled" : "enabled";
             return true;
         }
+        /* 性能统计：ARCADE_PERF=1 时打开（本地对标设备用） */
+        if (!strcmp(v->key, "arcade_perf")) {
+            v->value = getenv("ARCADE_PERF") ? "enabled" : "disabled";
+            return true;
+        }
         return false;
     }
     return false;
@@ -296,6 +327,7 @@ static int run_all(int argc, char **argv)
         else if (!strncmp(argv[i], "--every=", 8)) g_every = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--cache=", 8)) g_save_dir = argv[i] + 8;
         else if (!strcmp(argv[i], "--nocache")) g_cache_off = 1;
+        else if (!strcmp(argv[i], "--pace")) g_pace = 1;
     }
     size_t len = 0;
     unsigned char *buf = read_file(argv[1], &len);
@@ -323,8 +355,16 @@ static int run_all(int argc, char **argv)
         fprintf(stderr, "retro_load_game failed\n");
         return 1;
     }
+    double pace_t0 = wall_ms();
     for (int i = 0; i < frames; i++) {
         g_frame_no = i;
+        if (g_pace) {
+            /* 每帧对齐到 60fps 时间线：真实前端给核心的就是 16.7ms 一帧，
+               runtime 的定时器按墙钟触发，不节流测出来的 step 会偏小。 */
+            double due = (double)(i + 1) * (1000.0 / 60.0);
+            double now = wall_ms() - pace_t0;
+            if (due > now) wall_sleep_ms(due - now);
+        }
         if (i == g_met_from) { g_peak = 0; g_energy = 0; g_audio_samples = 0; }
         retro_run();
         if (i == g_reset_at) retro_reset();

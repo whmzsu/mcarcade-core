@@ -115,6 +115,18 @@
     return rgbaBuf;
   };
 
+  /* 快路径：直接把 pxt 的 uint32 屏缓冲（0xAABBGGRR）交给 C 侧。
+     C 一趟转成 XRGB8888，比在 JS 里逐像素写 Uint8ClampedArray 快一个数量级
+     （设备上这一项每帧能省 10ms 以上）。返回非 typed array 时 C 会退回 arcade_rgba。 */
+  globalThis.arcade_fb32 = function () {
+    var b = board();
+    var st = b && b.screenState;
+    var s = st && st.screen;
+    if (!s || !s.length || !s.buffer) return null;
+    if (s.length < 160 * 120) return null;
+    return s;
+  };
+
   globalThis.arcade_set_button = function (name, down) {
     try {
       var k = KEYMAP[String(name)];

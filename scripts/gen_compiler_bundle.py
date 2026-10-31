@@ -88,9 +88,16 @@ def main():
     pairs = [("pxt-core/", args.pxt_core), ("pxt-arcade/", args.pxt_arcade)]
     files = collect(pairs)
     if "pxt-core/built/pxt_hack.js" not in files:
-        sys.exit("找不到 pxt_hack.js，--pxt-core 指错了？")
+        sys.exit(
+            "找不到 pxt_hack.js —— pxtc 环境不完整或路径不对：\n"
+            "  --pxt-core 指向 %s\n"
+            "  先运行 node tools/setup_pxtc.js（装到 PXTBUILD 或 %%TEMP%%\\pxtbuild），\n"
+            "  或用 -Dpxtbuild=<目录> 明确指定。\n"
+            "  注意：zig 的配置缓存不含环境变量，改过 PXTBUILD 后要带一次\n"
+            "  -Dpxtbuild=<目录>，或删掉 .zig-cache 让配置重新解析。" % args.pxt_core
+        )
     if "pxt-arcade/built/target.json" not in files:
-        sys.exit("找不到 target.json，--pxt-arcade 指错了？")
+        sys.exit("找不到 target.json —— --pxt-arcade 路径不对：%s" % args.pxt_arcade)
 
     filt = [{"id": lzma.FILTER_LZMA1, "dict_size": DICT_SIZE, "lc": 3, "lp": 0, "pb": 2,
              "mode": lzma.MODE_NORMAL, "nice_len": 273}]

@@ -49,6 +49,10 @@ def main():
       gen_bundle.py --outdir <dir>  写到 <dir>/pxt_bundle.h（zig build 用这个）
     """
     args = sys.argv[1:]
+    # --dep <path>：仅供 zig 把输入文件算进缓存键，脚本自己不用（见 build.zig genBundle）
+    while "--dep" in args:
+        i = args.index("--dep")
+        del args[i:i + 2]
     out_dir_arg = None
     if "--outdir" in args:
         i = args.index("--outdir")

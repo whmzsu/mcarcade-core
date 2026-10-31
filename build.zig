@@ -212,10 +212,29 @@ fn genBundle(b: *std.Build, python: []const u8) std.Build.LazyPath {
     cmd.addFileArg(b.path("scripts/gen_bundle.py"));
     cmd.addArg("--outdir");
     const dir = cmd.addOutputDirectoryArg("gen");
+    // 每个被打包的 JS 也要列进命令行：zig 只按命令行参数算缓存键，
+    // 不列出来的话改 glue.js / sim.js 不会重新生成头文件（踩过两次，症状是
+    // 「代码改了但行为没变」）。脚本端会忽略 --dep 参数。
+    const deps = [_][]const u8{
+        "runtime/timers.js",
+        "runtime/dom_mock.js",
+        "runtime/audio.js",
+        "runtime/glue.js",
+        "third_party/pxt-sim/pxtsim.js",
+        "third_party/pxt-sim/common-sim.js",
+        "third_party/pxt-sim/sim.js",
+    };
+    for (deps) |d| {
+        cmd.addArg("--dep");
+        cmd.addFileArg(b.path(d));
+    }
     return dir;
 }
 
 /// pxtc 环境目录：-Dpxtbuild 指定的优先，否则 $PXTBUILD / %TEMP%/pxtbuild
+///
+/// 注意：zig 的配置缓存不含环境变量，改过 PXTBUILD 之后要带一次 -Dpxtbuild=<目录>
+/// 或者删掉 .zig-cache，否则会继续用上次解析出来的旧路径。
 fn pxtBuildDir(b: *std.Build, override: ?[]const u8) []const u8 {
     if (override) |d| return b.dupe(d);
 
@@ -406,3 +425,4 @@ fn addBtnTest(
     mod.addCSourceFiles(.{ .files = DECODER_C, .flags = CFLAGS });
     return b.addExecutable(.{ .name = "btn_test", .root_module = mod });
 }
+

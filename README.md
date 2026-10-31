@@ -6,7 +6,10 @@
 在 RetroArch 里玩 MakeCode Arcade 的卡带。不模拟硬件，直接在 QuickJS 里跑**官方 pxt runtime**
 （`pxtsim.js` + `common-sim.js` + `sim.js`），游戏语义与 makecode.com 浏览器里跑的是同一份代码。
 
-- 主线 **v0.11**：**编译结果落盘缓存**——同一张 `.png` 卡带第二次开始只要 0.4 秒（跳过编译），
+- 主线 **v0.12**：**取帧零拷贝**——画面直接从 pxt 的 `uint32` 屏缓冲转出（原来要在 JS 里
+  逐像素写 `Uint8ClampedArray`），低端 ARM（RK3566 一类）每帧省掉十几毫秒，掉帧明显减少；
+  同时加了核心选项 `Performance Stats`，日志里每 2 秒打一行每帧耗时，设备上调性能用。
+- **v0.11**：**编译结果落盘缓存**——同一张 `.png` 卡带第二次开始只要 0.4 秒（跳过编译），
   核心选项里可以关掉。v0.10 把官方 pxt 编译器内嵌进了核心：拖 `.png` 卡带进去，当场编成
   `binary.js` 再跑，不需要 PC 预热。也仍然可以直接加载现成的 `binary.js`。
 - 旧版 **v0.9**：只认 `.js`，`.png` 得先在 PC 上用 `tools/cart_build.js` 转换。
@@ -266,6 +269,27 @@ Xbox 型手柄（按位置映射，标签与实际相反）用核心选项一键
 
 `X / Y / L / R` 无功能——MakeCode Arcade 本身没有这几个键。
 
+### 跑不动、掉帧时怎么定位
+
+`快速菜单 → 核心选项 → Performance Stats = enabled`，日志里每 2 秒会出现一行：
+
+```
+[arcade] perf: step 8.6ms present 0.0ms audio 0.1ms total 8.7ms (budget 16.7)
+```
+
+- `step`：游戏逻辑（QuickJS 跑官方 sim + 你的游戏代码），这是唯一会「慢」的部分
+- `present`：取画面 + 转成 XRGB8888（v0.12 起走零拷贝，正常情况下 0.x ms）
+- `audio`：音频合成（约 735 采样/帧）
+- `total` 超过 16.7 就会掉帧。弱机（RK3566 / A55 @1.8GHz）上 `step` 大约是桌面 x86 的 3~4 倍
+
+设备上首次加载 `.png` 慢（30 秒以上）是**编译**耗时，和每帧性能无关：编完会进编译缓存，
+第二次开始是秒开。想看编译时间花在哪，日志里已经有分阶段耗时：
+
+```
+[arcade] 依赖就绪，准备编译选项（已用 0.1s）
+[arcade] tsc 完成，用时 3.9s        ← 这段是 TypeScript 编译，几乎占满整个编译时间
+```
+
 ---
 
 ## 5. 实现要点（改代码前先看这几条）
@@ -407,6 +431,10 @@ node tools/ppm2png.js out.ppm out.png            # 转 PNG 看
 # 缓存目录默认是 <存档目录>/compile-cache，环境变量可以改（调试/自动化用）
 ARCADE_CACHE_DIR=/tmp/my-cache ./zig-out/bin/core_test tests/data/ping.png out.ppm 30
 ./zig-out/bin/cache_test /tmp/cctest                       # 缓存模块单测
+
+# 性能对标：--pace 按 60fps 节流 + ARCADE_PERF=1 打开每帧耗时统计。
+# 不节流跑得太快，runtime 的定时器按墙钟触发，step 会被严重低估（实测差 20 倍）
+ARCADE_PERF=1 ./zig-out/bin/core_test tests/data/ping.png out.ppm 300 --pace
 
 # 直接用 ctypes 驱动 DLL 跑一张卡带（同样是 1MB 栈线程，最接近真机）
 python tools/dev/dll_smoke.py zig-out/lib/arcade_libretro.dll tests/data/ping.png 90

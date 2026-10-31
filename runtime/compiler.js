@@ -615,6 +615,7 @@ function hasOwn(o, k) { return Object.keys(o).indexOf(k) >= 0; }
 function failNow(msg) { __fail(msg); return null; }
 
 function compileCard(cardJson) {
+  var tStart = Date.now();
   var files = JSON.parse(cardJson);
   /* pxt 的 installAllAsync 假设 pxt.json 一定存在，缺了会直接崩，这里先挡掉 */
   if (!hasOwn(files, "pxt.json"))
@@ -656,11 +657,15 @@ function compileCard(cardJson) {
   var mainPkg = new pxt.MainPackage(host);
   clog("开始安装依赖（生成 pxt_modules）");
   return mainPkg.installAllAsync().then(function () {
-    clog("依赖就绪，准备编译选项");
+    /* 阶段耗时：设备上编得慢时能看出是装依赖慢还是 tsc 慢 */
+    clog("依赖就绪，准备编译选项（已用 " + ((Date.now() - tStart) / 1000).toFixed(1) + "s）");
     return mainPkg.getCompileOptionsAsync();
   }).then(function (opts) {
-    clog("源文件 " + (opts.sourceFiles || []).length + " 个，开始编译");
+    var tOpts = Date.now();
+    clog("源文件 " + (opts.sourceFiles || []).length + " 个，开始编译（依赖阶段 " +
+         ((tOpts - tStart) / 1000).toFixed(1) + "s）");
     var res = pxtc.compile(opts);
+    clog("tsc 完成，用时 " + ((Date.now() - tOpts) / 1000).toFixed(1) + "s");
     var diags = (res.diagnostics || []);
     if (diags.length) {
       var msg = diags.slice(0, 5).map(function (d) {

@@ -1,5 +1,5 @@
 /*
- * core.c —— libretro 核心实现（v0.11：官方 pxt runtime + 编译缓存）
+ * core.c —— libretro 核心实现（v0.12：取帧零拷贝 + 性能统计）
  *
  * 两种内容都能直接加载：
  *   .png  MakeCode Arcade 卡带 —— 卡带里是 TypeScript 工程，由内嵌的官方 pxt 编译器
@@ -21,6 +21,12 @@
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 #include "libretro.h"
 #include "quickjs.h"
@@ -68,11 +74,48 @@ static void arc_log(const char *fmt, ...)
     else fprintf(stderr, "[arcade] %s\n", buf);
 }
 
+/* ---------------- 性能统计 ----------------
+ *
+ * 核心选项 Performance Stats 打开后，每 120 帧往日志里打一行平均耗时：
+ *   perf: step 8.2ms present 1.4ms audio 0.9ms total 10.5ms (budget 16.7)
+ * step 是游戏逻辑（JS），present 是取画面+转像素，audio 是合成音频。
+ * 设备上跑不动时先看这个，能立刻分清是 JS 太慢还是贴图/音频拖后腿。
+ */
+static int g_perf_on;
+static double g_perf_step, g_perf_present, g_perf_audio;
+static int g_perf_frames;
+
+static double perf_now_ms(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+#endif
+}
+
+static void perf_flush(void)
+{
+    if (g_perf_frames <= 0) return;
+    double n = (double)g_perf_frames;
+    arc_log("perf: step %.1fms present %.1fms audio %.1fms total %.1fms (budget 16.7)",
+            g_perf_step / n, g_perf_present / n, g_perf_audio / n,
+            (g_perf_step + g_perf_present + g_perf_audio) / n);
+    g_perf_step = g_perf_present = g_perf_audio = 0;
+    g_perf_frames = 0;
+}
+
 /* ---------------- 状态 ---------------- */
 
 static JSRuntime *js_rt;
 static JSContext *js_ctx;
-static JSValue fn_boot, fn_step, fn_rgba, fn_button, fn_audio;
+static JSValue fn_boot, fn_step, fn_rgba, fn_button, fn_audio, fn_fb;
 static char *g_source;   /* binary.js 全文（NUL 结尾） */
 static uint32_t *g_fb;
 static int g_loaded;
@@ -237,6 +280,7 @@ static int js_init(void)
     fn_rgba = JS_GetPropertyStr(js_ctx, g2, "arcade_rgba");
     fn_button = JS_GetPropertyStr(js_ctx, g2, "arcade_set_button");
     fn_audio = JS_GetPropertyStr(js_ctx, g2, "arcade_audio");
+    fn_fb = JS_GetPropertyStr(js_ctx, g2, "arcade_fb32");
     JS_FreeValue(js_ctx, g2);
 
     if (!JS_IsFunction(js_ctx, fn_boot) || !JS_IsFunction(js_ctx, fn_step) || !JS_IsFunction(js_ctx, fn_rgba)) {
@@ -254,6 +298,7 @@ static void js_shutdown(void)
         JS_FreeValue(js_ctx, fn_rgba);
         JS_FreeValue(js_ctx, fn_button);
         JS_FreeValue(js_ctx, fn_audio);
+        JS_FreeValue(js_ctx, fn_fb);
         JS_FreeContext(js_ctx);
         js_ctx = NULL;
     }
@@ -290,6 +335,8 @@ EXPORT void retro_set_environment(retro_environment_t cb)
           "Swap A/B Buttons; disabled|enabled" },
         { "arcade_compile_cache",
           "Compile Cache (png carts, ~5s saved); enabled|disabled" },
+        { "arcade_perf",
+          "Performance Stats (log every 2s); disabled|enabled" },
         { NULL, NULL }
     };
     cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
@@ -317,6 +364,10 @@ static void read_options(void)
     v.value = NULL;
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
         g_compile_cache = (strcmp(v.value, "enabled") == 0);
+    v.key = "arcade_perf";
+    v.value = NULL;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
+        g_perf_on = (strcmp(v.value, "enabled") == 0);
 }
 
 /*
@@ -404,7 +455,7 @@ EXPORT void retro_get_system_info(struct retro_system_info *info)
 {
     memset(info, 0, sizeof(*info));
     info->library_name = "MakeCode Arcade (official runtime)";
-    info->library_version = "0.11";
+    info->library_version = "0.12";
     info->valid_extensions = "js|png";
     info->need_fullpath = false;
     info->block_extract = true;
@@ -445,7 +496,9 @@ static void set_pixel_format(void)
 
 static double now_ms(void)
 {
-    return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
+    /* 以前用 clock()：Windows 上是墙钟，Linux 上却是 CPU 时间，日志里的
+       "编译用时 X 秒" 在设备上会偏小。统一走单调墙钟。 */
+    return perf_now_ms();
 }
 
 /* PNG 签名。卡带是标准 PNG（工程数据藏在像素低位），所以头 8 字节一定对得上。 */
@@ -668,6 +721,43 @@ static void poll_input(void)
 
 static void present_frame(void)
 {
+    /*
+     * 快路径：直接取 pxt 的 uint32 屏缓冲（0xAABBGGRR，低字节 R），C 里一趟转
+     * XRGB8888。旧路径要在 JS 里逐像素写 4 个 Uint8ClampedArray 元素（带钳位），
+     * 19.2k 像素在低端 ARM 上每帧要十几毫秒 —— 这是设备掉帧的主因之一。
+     */
+    if (JS_IsFunction(js_ctx, fn_fb)) {
+        JSValue t = JS_Call(js_ctx, fn_fb, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(t)) {
+            JS_FreeValue(js_ctx, JS_GetException(js_ctx));
+        } else {
+            size_t off = 0, blen = 0, bpe = 0;
+            JSValue ab = JS_GetTypedArrayBuffer(js_ctx, t, &off, &blen, &bpe);
+            if (!JS_IsException(ab)) {
+                size_t ablen = 0;
+                uint8_t *p = JS_GetArrayBuffer(js_ctx, &ablen, ab);
+                if (p && blen >= (size_t)SCREEN_W * SCREEN_H * 4) {
+                    const uint8_t *src = p + off;
+                    for (int i = 0; i < SCREEN_W * SCREEN_H; i++) {
+                        uint32_t v;
+                        memcpy(&v, src + (size_t)i * 4, 4);   /* 避免未对齐访问 */
+                        g_fb[i] = 0xff000000u | ((v & 0xffu) << 16) |
+                                  (v & 0xff00u) | ((v >> 16) & 0xffu);
+                    }
+                    JS_FreeValue(js_ctx, ab);
+                    JS_FreeValue(js_ctx, t);
+                    if (video_cb) video_cb(g_fb, SCREEN_W, SCREEN_H, SCREEN_W * sizeof(uint32_t));
+                    return;
+                }
+                JS_FreeValue(js_ctx, ab);
+            } else {
+                JS_FreeValue(js_ctx, JS_GetException(js_ctx));
+            }
+            JS_FreeValue(js_ctx, t);
+        }
+    }
+
+    /* 兼容路径：老的 RGBA 转换（arcade_fb32 不可用时） */
     JSValue v = JS_Call(js_ctx, fn_rgba, JS_UNDEFINED, 0, NULL);
     if (JS_IsException(v)) {
         JSValue exc = JS_GetException(js_ctx);
@@ -765,6 +855,7 @@ EXPORT void retro_run(void)
         retro_reset();
     }
 
+    double tp0 = g_perf_on ? perf_now_ms() : 0.0;
     JSValue dt = JS_NewFloat64(js_ctx, FRAME_MS);
     JSValue r = JS_Call(js_ctx, fn_step, JS_UNDEFINED, 1, &dt);
     if (JS_IsException(r)) {
@@ -787,7 +878,9 @@ EXPORT void retro_run(void)
         }
     }
 
+    double tp1 = g_perf_on ? perf_now_ms() : 0.0;
     present_frame();
+    double tp2 = g_perf_on ? perf_now_ms() : 0.0;
 
     int frames = pull_audio(g_audio, AUDIO_HZ / 30);
     if (frames <= 0) {
@@ -798,6 +891,13 @@ EXPORT void retro_run(void)
     if (audio_batch_cb) audio_batch_cb(g_audio, frames);
     else if (audio_sample_cb)
         for (int i = 0; i < frames; i++) audio_sample_cb((uint16_t)g_audio[i * 2], (uint16_t)g_audio[i * 2 + 1]);
+
+    if (g_perf_on) {
+        g_perf_step += tp1 - tp0;
+        g_perf_present += tp2 - tp1;
+        g_perf_audio += perf_now_ms() - tp2;
+        if (++g_perf_frames >= 120) perf_flush();   /* 2 秒一行 */
+    }
 }
 
 EXPORT size_t retro_serialize_size(void) { return 0; }
