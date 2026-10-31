@@ -100,6 +100,10 @@ makecode-arcade-core/
 ```bash
 # 内嵌编译器的载荷要从 pxtc 里取，编核心前先装一次（只影响构建，运行期不需要 Node）
 node tools/setup_pxtc.js          # → %TEMP%\pxtbuild；或用 -Dpxtbuild=<目录> 指别处
+# 建议放到非系统盘，防止清理临时目录时误删（装一次就不用重装）：
+#   PXTBUILD=E:/pxtbuild node tools/setup_pxtc.js
+# 然后把环境变量固化（build.zig / cart_build.js / 自检工具都认它）：
+#   setx PXTBUILD E:\pxtbuild
 
 # 自检：PNG 卡带解析 + ping.js 跑 90 帧（约定 389 个非黑像素）
 zig build test
