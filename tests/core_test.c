@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <time.h>   /* Linux 上 clock_gettime / CLOCK_MONOTONIC / nanosleep */
 
 #include "libretro.h"
 
