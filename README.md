@@ -1,5 +1,8 @@
 # MakeCode Arcade —— libretro 核心
 
+[![CI](https://github.com/whmzsu/mcarcade-core/actions/workflows/ci.yml/badge.svg)](https://github.com/whmzsu/mcarcade-core/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/whmzsu/mcarcade-core)](https://github.com/whmzsu/mcarcade-core/releases/latest)
+
 在 RetroArch 里玩 MakeCode Arcade 的卡带。不模拟硬件，直接在 QuickJS 里跑**官方 pxt runtime**
 （`pxtsim.js` + `common-sim.js` + `sim.js`），游戏语义与 makecode.com 浏览器里跑的是同一份代码。
 
