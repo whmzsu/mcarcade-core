@@ -58,7 +58,9 @@ makecode-arcade-core/
 ├── scripts/
 │   ├── gen_bundle.py      runtime/*.js + pxt-sim → pxt_bundle.h
 │   ├── gen_compiler_bundle.py  pxt_hack.js + target.json + runtime/compiler.js → pxt_compiler_bundle.h
-│   └── fetch_deps.py      首次拉第三方源码到 third_party/
+│   ├── fetch_deps.py      首次拉第三方源码到 third_party/
+│   ├── package.py         dist/ → out/mcarcade-core-<ver>-<stamp>.zip（顺带重算 CHECKSUMS.txt）
+│   └── publish.py         建仓库 / 注册部署密钥 / 推 tag / 发 Release 并挂 zip（REST API）
 ├── third_party/           quickjs / miniz / lzma / libretro / pxt-sim（原样入库，clone 即可编译）
 └── dist/                  只入库 arcade_libretro.info；dll/so 走 GitHub Releases
 ```
@@ -130,6 +132,29 @@ zig build -Dincart_compiler=false   # 不内嵌编译器：核心 6.4MB → 2.2M
 **Android 为什么要 `-Dndk`**：Zig 不带 bionic libc，Android 目标必须借 NDK 的
 `sysroot`（头文件 + `crtbegin_so.o` + `libc.so/libdl.so/libm.so` stub）。`build.zig` 会自动
 定位 `<NDK>/toolchains/llvm/prebuilt/<host>/sysroot`，并按 `-Dandroid-api`（默认 21）选库目录。
+
+### 打发布包
+
+```bash
+zig build release -Dndk=../ndk/android-ndk-r27c   # → zig-out/lib/
+cp zig-out/lib/arcade_libretro* dist/             # 同步到 dist/（发布以 dist 为准）
+python scripts/package.py                         # → out/mcarcade-core-<ver>-<stamp>.zip
+```
+
+`package.py` 先按实际文件重算 `dist/CHECKSUMS.txt`（sha256 + 字节数），再组装 zip：
+四个平台二进制 + `android/arcade_libretro.so`（与桌面 `.so` 同名，只能分目录）+ `README.md` +
+`CHECKSUMS.txt`。版本号从 `build.zig.zon` 读，时间戳默认当前。
+
+发到 GitHub（建仓库 / 注册部署密钥 / 推 tag / 发 Release / 挂 zip 一条命令）：
+
+```bash
+GH_TOKEN=<repo 权限的 PAT> python scripts/publish.py \
+    --zip out/mcarcade-core-0.10.0-*.zip --notes out/release-notes-0.10.0.md
+```
+
+`publish.py` 走 REST API 建仓库和发 Release，推送走 SSH——两者分开是因为
+受限网络里常常只有一条通道能出去（`api.github.com` / `uploads.github.com` 通、
+`github.com` 的 HTTPS 被拦时，`ssh.github.com:443` 往往还能用）。
 
 `Makefile` 只是薄壳，转发到 zig（保留老习惯）：
 
