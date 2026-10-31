@@ -156,8 +156,11 @@ python scripts/package.py                         # → out/mcarcade-core-<ver>-
 
 ```bash
 GH_TOKEN=<repo 权限的 PAT> python scripts/publish.py \
-    --zip out/mcarcade-core-0.10.0-*.zip --notes out/release-notes-0.10.0.md
+    --zip 'out/mcarcade-core-*.zip' --notes out/release-notes-0.11.0.md
 ```
+
+通配符匹配到多份时，`publish.py` 按修改时间取最新的那个（不是按文件名排序——
+字典序会认为 `0.11.0` 比 `0.9.1` 小，从而挑出上一版）。
 
 `publish.py` 走 REST API 建仓库和发 Release，推送走 SSH——两者分开是因为
 受限网络里常常只有一条通道能出去（`api.github.com` / `uploads.github.com` 通、

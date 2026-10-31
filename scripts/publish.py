@@ -8,8 +8,8 @@ publish.py —— 用 GitHub REST API 建仓库 + 注册部署密钥 + 打 tag +
 ssh.github.com:443）能推。所以流程是：
     API 建仓库 / 注册 deploy key  →  git push（SSH）  →  API 发 Release 并上传 zip
 
-    GH_TOKEN=<pat> python scripts/publish.py --repo mcarcade-core --tag v0.10.0 \
-        --zip out/mcarcade-core-0.10.0-*.zip --notes out/release-notes-0.10.0.md
+    GH_TOKEN=<pat> python scripts/publish.py --repo mcarcade-core --tag v0.11.0 \
+        --zip 'out/mcarcade-core-*.zip' --notes out/release-notes-0.11.0.md
 
 PAT 需要 repo 权限（classic）。走 SSH 推送不受 workflow scope 限制。
 token 只从环境变量读，不落盘、不打印。
@@ -76,10 +76,14 @@ def main():
         sys.exit("请先设置 GH_TOKEN 环境变量（repo 权限的 PAT）")
 
     root = git("rev-parse", "--show-toplevel")
-    zips = sorted(glob.glob(os.path.join(root, args.zip)) or glob.glob(args.zip))
+    zips = glob.glob(os.path.join(root, args.zip)) or glob.glob(args.zip)
     if not zips:
         sys.exit(f"找不到发布包：{args.zip}")
-    zpath = zips[-1]
+    # 按修改时间取最新，不能按文件名——字典序会认为 "0.11.0" < "0.9.1"，
+    # 通配符匹配到多份时会挑出上一版。
+    zpath = max(zips, key=os.path.getmtime)
+    if len(zips) > 1:
+        print(f"匹配到 {len(zips)} 个包，取最新的 {os.path.basename(zpath)}")
     zname = os.path.basename(zpath)
 
     # ---- 1. 我是谁 ----
