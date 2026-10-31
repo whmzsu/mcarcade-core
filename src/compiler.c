@@ -26,6 +26,8 @@
 
 int compiler_is_embedded(void) { return 0; }
 
+const char *compiler_build_id(void) { return "none"; }
+
 int compiler_build(const char *proj_json, size_t proj_len,
                    char **out_js, size_t *out_len,
                    void (*log)(const char *msg, void *ud), void *log_ud,
@@ -247,6 +249,8 @@ static void free_runtime(JSRuntime *rt, JSContext *ctx)
 }
 
 int compiler_is_embedded(void) { return 1; }
+
+const char *compiler_build_id(void) { return pxt_compiler_id; }
 
 int compiler_build(const char *proj_json, size_t proj_len,
                    char **out_js, size_t *out_len,

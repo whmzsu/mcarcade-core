@@ -1,9 +1,10 @@
 /*
- * core.c —— libretro 核心实现（v0.9：官方 pxt runtime）
+ * core.c —— libretro 核心实现（v0.11：官方 pxt runtime + 编译缓存）
  *
  * 两种内容都能直接加载：
  *   .png  MakeCode Arcade 卡带 —— 卡带里是 TypeScript 工程，由内嵌的官方 pxt 编译器
- *         当场编译成 binary.js（首次 5~6 秒，之后这就是程序本体）
+ *         当场编译成 binary.js（首次 5~6 秒；产物按「源码 + 编译器指纹」缓存到存档目录，
+ *         第二次开始 0.4 秒；核心选项 Compile Cache 可关）
  *   .js   已经是编译产物 binary.js —— 直接用，零开销
  *
  * 运行模型：binary.js -> QuickJS 里跑 官方 pxtsim+common-sim+sim（src/pxt_bundle.h）
@@ -26,6 +27,7 @@
 #include "pxt_bundle.h"
 #include "cart.h"
 #include "compiler.h"
+#include "cache.h"
 
 /* Windows 的 DLL 不会自动导出符号，必须显式 dllexport（Linux -shared 默认全导出） */
 #ifdef _WIN32
@@ -49,6 +51,7 @@ static retro_input_state_t input_state_cb;
 /* 输入相关状态。前端的 Controls 菜单要靠这些声明才知道该怎么显示/给什么改。 */
 static bool g_bitmask_supported = false;   /* 前端支持位掩码轮询 */
 static bool g_ab_swap = false;             /* 核心选项：交换 A/B */
+static bool g_compile_cache = true;        /* 核心选项：编译缓存 */
 static unsigned g_port_device = RETRO_DEVICE_JOYPAD;
 static int g_select_state = 0;    /* SELECT 上一帧状态，用于边沿检测 */
 static int g_pending_reset = 0;   /* 本帧需要重启游戏（真机 RESET 键的等价物） */
@@ -285,6 +288,8 @@ EXPORT void retro_set_environment(retro_environment_t cb)
     static struct retro_variable vars[] = {
         { "arcade_ab_swap",
           "Swap A/B Buttons; disabled|enabled" },
+        { "arcade_compile_cache",
+          "Compile Cache (png carts, ~5s saved); enabled|disabled" },
         { NULL, NULL }
     };
     cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void *)vars);
@@ -301,12 +306,40 @@ static void read_options(void)
 {
     struct retro_variable v;
     g_ab_swap = false;
+    g_compile_cache = true;
     if (!environ_cb)
         return;
     v.key = "arcade_ab_swap";
     v.value = NULL;
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
         g_ab_swap = (strcmp(v.value, "enabled") == 0);
+    v.key = "arcade_compile_cache";
+    v.value = NULL;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &v) && v.value)
+        g_compile_cache = (strcmp(v.value, "enabled") == 0);
+}
+
+/*
+ * 编译缓存目录。
+ *
+ * 放前端的存档目录下（RetroArch 是 saves/<核心名>/），跟着便携包和云同步走，
+ * 不往系统目录里塞东西。ARCADE_CACHE_DIR 可以覆盖，自检和调试用。
+ */
+static const char *cache_dir(void)
+{
+    static char dir[1024];
+    const char *env = getenv("ARCADE_CACHE_DIR");
+    const char *base = NULL;
+
+    if (env && env[0]) {
+        snprintf(dir, sizeof(dir), "%s", env);
+        return dir;
+    }
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &base) && base && base[0]) {
+        snprintf(dir, sizeof(dir), "%s/compile-cache", base);
+        return dir;
+    }
+    return NULL;
 }
 
 /*
@@ -371,7 +404,7 @@ EXPORT void retro_get_system_info(struct retro_system_info *info)
 {
     memset(info, 0, sizeof(*info));
     info->library_name = "MakeCode Arcade (official runtime)";
-    info->library_version = "0.10";
+    info->library_version = "0.11";
     info->valid_extensions = "js|png";
     info->need_fullpath = false;
     info->block_extract = true;
@@ -480,18 +513,52 @@ EXPORT bool retro_load_game(const struct retro_game_info *game)
         char err[256] = { 0 };
         size_t js_len = 0;
         double t0 = now_ms();
-        arc_log("开始编译（首次约 5~6 秒，请稍候）…");
-        int rc = compiler_build(cart.source, cart.source_len, &g_source, &js_len,
-                                compile_log, NULL, err, sizeof(err));
-        cart_free(&cart);
-        if (rc != 0) {
-            arc_log("编译失败: %s", err[0] ? err : "未知错误");
-            free(g_source);
-            g_source = NULL;
-            return false;
+
+        /*
+         * 编译缓存。同一份工程编出来的 binary.js 是确定的，所以键只取
+         * 「工程文件表 + 编译器指纹」：换卡带内容或换核心版本都不会错命中。
+         */
+        char ckey[17] = { 0 };
+        const char *cdir = g_compile_cache ? cache_dir() : NULL;
+        int hit = 0;
+
+        if (cdir) {
+            cache_key(cart.source, cart.source_len, compiler_build_id(), ckey);
+            int cr = cache_load(cdir, ckey, compiler_build_id(), &g_source, &js_len);
+            if (cr == 0) {
+                hit = 1;
+                arc_log("编译缓存命中：binary.js %u 字节（键 %s），省去一次编译",
+                        (unsigned)js_len, ckey);
+            } else if (cr < 0) {
+                arc_log("编译缓存 %s 损坏或来自别的编译器，重新编译", ckey);
+            }
+        } else if (g_compile_cache) {
+            arc_log("编译缓存已开启，但拿不到存档目录（可用环境变量 ARCADE_CACHE_DIR 指定），"
+                    "本次不缓存");
         }
-        arc_log("编译完成：binary.js %u 字节，用时 %.1f 秒",
-                (unsigned)js_len, (now_ms() - t0) / 1000.0);
+
+        if (!hit) {
+            arc_log("开始编译（首次约 5~6 秒，编过的卡带下次直接读缓存）…");
+            int rc = compiler_build(cart.source, cart.source_len, &g_source, &js_len,
+                                    compile_log, NULL, err, sizeof(err));
+            if (rc != 0) {
+                arc_log("编译失败: %s", err[0] ? err : "未知错误");
+                free(g_source);
+                g_source = NULL;
+                cart_free(&cart);
+                return false;
+            }
+            arc_log("编译完成：binary.js %u 字节，用时 %.1f 秒",
+                    (unsigned)js_len, (now_ms() - t0) / 1000.0);
+
+            if (cdir) {
+                if (cache_save(cdir, ckey, compiler_build_id(), g_source, js_len) == 0)
+                    arc_log("已写入编译缓存（%s/%s.bin）", cdir, ckey);
+                else
+                    arc_log("编译缓存写入失败（%s，不影响游戏）", cdir);
+            }
+        }
+        cart_free(&cart);
     } else {
         /* ---- 已经是编译产物 binary.js ---- */
         g_source = (char *)malloc(game->size + 1);
@@ -687,7 +754,7 @@ EXPORT void retro_run(void)
     if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated) {
         read_options();
         set_input_descriptors();
-        arc_log("options updated: ab_swap=%d", (int)g_ab_swap);
+        arc_log("options updated: ab_swap=%d cache=%d", (int)g_ab_swap, (int)g_compile_cache);
     }
 
     poll_input();

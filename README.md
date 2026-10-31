@@ -6,8 +6,9 @@
 在 RetroArch 里玩 MakeCode Arcade 的卡带。不模拟硬件，直接在 QuickJS 里跑**官方 pxt runtime**
 （`pxtsim.js` + `common-sim.js` + `sim.js`），游戏语义与 makecode.com 浏览器里跑的是同一份代码。
 
-- 主线 **v0.10**：**把官方 pxt 编译器内嵌进了核心**——拖 `.png` 卡带进去，当场编成 `binary.js` 再跑，
-  不需要 PC 预热。也仍然可以直接加载现成的 `binary.js`。
+- 主线 **v0.11**：**编译结果落盘缓存**——同一张 `.png` 卡带第二次开始只要 0.4 秒（跳过编译），
+  核心选项里可以关掉。v0.10 把官方 pxt 编译器内嵌进了核心：拖 `.png` 卡带进去，当场编成
+  `binary.js` 再跑，不需要 PC 预热。也仍然可以直接加载现成的 `binary.js`。
 - 旧版 **v0.9**：只认 `.js`，`.png` 得先在 PC 上用 `tools/cart_build.js` 转换。
 - 更旧 **v0.8**：手写兼容层（直接吃 `.png`）。这套实现已从主线移出（v0.10 起官方 sim 是
   唯一运行时），要跑请用预编译核心 `out/mcarcade-core-0.8-*.zip`，源码见 git 历史。
@@ -16,6 +17,7 @@
 RetroArch ── arcade_libretro.{dll,so} ──┬─ src/core.c       libretro 接口 + QuickJS 宿主 + 每帧抽干 microtask
                                         ├─ src/cart.c       PNG 卡带解析（低位隐写 + LZMA）
                                         ├─ src/compiler.c   开临时 QuickJS，跑内嵌 pxt 编译器（png → binary.js）
+                                        ├─ src/cache.c      编译缓存：产物按「源码 + 编译器指纹」存进存档目录
                                         ├─ pxt_bundle.h           官方三层 sim + DOM/WebAudio mock + glue（≈1.03 MB，构建时生成）
                                         ├─ pxt_compiler_bundle.h  pxt_hack.js + target.json + 胶水（≈2 MB，构建时生成）
                                         └─ game.js / game.png     由前端作为"内容"载入
@@ -37,6 +39,7 @@ makecode-arcade-core/
 │   ├── core.c             libretro 接口：视频 160×120 XRGB8888、按键、音频、QuickJS 宿主
 │   ├── cart.c/.h          PNG 卡带解析（低位隐写 + LZMA），自检与工具复用
 │   ├── decompress.c/.h    LZMA-alone 解压（卡带 blob 与编译器载荷共用）
+│   ├── cache.c/.h         编译缓存（CRC + 编译器指纹校验、原子写入、条数上限淘汰）
 │   └── compiler.c/.h      内嵌编译器：临时 QuickJS + 6 个宿主函数 → binary.js
 ├── runtime/               ★ 嵌进 core 的 JS（按顺序拼成 pxt_bundle.h）
 │   ├── timers.js          真实时间驱动的 setTimeout/setInterval/rAF + console 转发
@@ -54,9 +57,10 @@ makecode-arcade-core/
 │   └── dev/               开发期的探针脚本（Node 对照、QuickJS 性能、菜单自测等，见其 README）
 │       └── embed_probe/   内嵌编译器可行性探针（qjsrun.c + harness.js + 实测数据）
 ├── tests/
-│   ├── core_test.c        假前端：直接调 retro_* 跑帧 → PPM
+│   ├── core_test.c        假前端：直接调 retro_* 跑帧 → PPM（--cache=DIR 验证编译缓存）
 │   ├── cart_test.c        只测卡带解析
 │   ├── btn_test.c         按键映射自检
+│   ├── cache_test.c       编译缓存自检（命中/截断/篡改/指纹/淘汰）
 │   └── data/              测试卡带与 pxtc 产物（ping.js / ping.png 等）
 ├── scripts/
 │   ├── gen_bundle.py      runtime/*.js + pxt-sim → pxt_bundle.h
@@ -251,6 +255,8 @@ node tools/cart_build.js 游戏.png -o out/游戏名/ --extdir=build/exts
 Xbox 型手柄（按位置映射，标签与实际相反）用核心选项一键交换：
 `快速菜单 → 核心选项 → Swap A/B Buttons = enabled`（实时生效，不改你已有的绑定）。
 
+同一个菜单里还有 `Compile Cache`：`.png` 卡带的编译产物要不要落盘复用（默认开，见 5.2）。
+
 `X / Y / L / R` 无功能——MakeCode Arcade 本身没有这几个键。
 
 ---
@@ -331,6 +337,27 @@ src/compiler.c                       runtime/compiler.js（打包成 pxt_compile
 **验证方式**：同一张卡带分别用内嵌编译器和 `node tools/cart_build.js` 编译，`cmp` 两份
 `binary.js` —— ping / btnprobe 均**逐字节一致**；画面非黑像素与历史参考值相同。
 
+### 5.2 编译缓存（v0.11）
+
+同一份工程编出来的 `binary.js` 是确定的，所以产物值得存盘复用：
+
+- **键 = 工程文件表 + 编译器指纹**。`FNV-1a 64` 打在卡带的工程 JSON 上，再混入
+  `pxt_compiler_id`（`gen_compiler_bundle.py` 打包载荷时算的 blake2b-64，写进 `pxt_compiler_bundle.h`）。
+  换卡带内容、换 pxt 版本、改 `runtime/compiler.js` 都会变键，不会错用别人的产物。
+- **位置**：`<存档目录>/compile-cache/<16 位十六进制>.bin`。RetroArch 下是
+  `saves/<核心名>/compile-cache/`，跟着便携包和云同步走，不往系统目录写东西。
+- **格式**：32 字节头（`MCC1` 魔数 + 载荷长度 + CRC32 + 编译器指纹）+ `binary.js` 原文。
+  长度或 CRC 对不上就当未命中重编——断电留下的半截文件不会把游戏带进黑屏。
+- **写入**：先写 `<键>.tmp` 再改名，进程被杀不会留半个文件。
+- **淘汰**：最多 64 份（约 160MB），超出按 mtime 删最旧的；只删 `<16 hex>.bin`，
+  目录里别的东西一个不碰。
+- **Windows 中文路径**：前端传的是 UTF-8，Windows 上统一转宽字符再 `_wfopen/_wmkdir/_wrename`，
+  否则中文存档目录（很常见）根本打不开。
+- **开关**：`快速菜单 → 核心选项 → Compile Cache`，默认 `enabled`；关掉只影响下一次 load。
+
+实测 ping：首次 4.5 秒编译 + 写出 2,220,629 字节，第二次 **0.36 秒**（整条启动链路），
+出图与首轮逐字节相同。
+
 ---
 
 ## 6. 已知限制
@@ -340,12 +367,12 @@ src/compiler.c                       runtime/compiler.js（打包成 pxt_compile
 | 直接加载 `.png` | ✅ v0.10 起支持（核心内嵌编译器，首次约 5 秒） |
 | 编译期内存 | ⚠️ 峰值约 210MB，**128MB 设备不可用**，256MB 起比较稳 |
 | 依赖 `github:` / `http:` 扩展的卡带 | ❌ 内嵌编译器不联网，需 PC 上 `cart_build.js` 转换 |
-| 编译结果缓存 | ❌ 不写盘，每次 load 重新编译 |
+| 编译结果缓存 | ✅ v0.11 起默认开启（存档目录下 64 份，核心选项可关） |
 | 音频 | ✅ `playTone` / 旋律 / `soundExpression` 出声；噪声类音色近似白噪声 |
 | `.wav` 采样类扩展音效（`playBufferAsync`） | ❌ 暂静音，触发时打 warn |
 | 存档状态 | ❌ 不支持（JS 闭包无法可靠序列化） |
 | 玩家 2 输入 | ⚠️ 只轮询端口 0，双人需在 `poll_input` 加端口 1 映射 `Key+7` |
-| 重置 | ⚠️ 整机重建（`.js` 约 0.3s 重新 eval；`.png` 会把整个编译再跑一遍） |
+| 重置 | ⚠️ 整机重建（重新 boot，不重新编译：`.png` 也只要 0.3 秒） |
 | 32 位 armv7 / mips | ⚠️ 未编；`zig build -Dtarget=arm-linux-gnueabihf` 可自行尝试 |
 
 ---
@@ -365,6 +392,14 @@ node tools/ppm2png.js out.ppm out.png            # 转 PNG 看
 
 # 模拟 RetroArch 的 1MB 线程栈（专测内嵌编译器的递归深度）
 ./zig-out/bin/core_test tests/data/ping.png out.ppm 1 --stack=1024
+
+# 编译缓存：第一次编，第二次 0.4 秒命中（--nocache 验证核心选项关掉后的行为）
+./zig-out/bin/core_test tests/data/ping.png out.ppm 90 --cache=/tmp/saves
+./zig-out/bin/core_test tests/data/ping.png out.ppm 90 --cache=/tmp/saves   # 日志应出现「编译缓存命中」
+
+# 缓存目录默认是 <存档目录>/compile-cache，环境变量可以改（调试/自动化用）
+ARCADE_CACHE_DIR=/tmp/my-cache ./zig-out/bin/core_test tests/data/ping.png out.ppm 30
+./zig-out/bin/cache_test /tmp/cctest                       # 缓存模块单测
 
 # 直接用 ctypes 驱动 DLL 跑一张卡带（同样是 1MB 栈线程，最接近真机）
 python tools/dev/dll_smoke.py zig-out/lib/arcade_libretro.dll tests/data/ping.png 90

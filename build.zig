@@ -14,11 +14,11 @@ const std = @import("std");
 // 「按目标平台编译 C + 生成 pxt_bundle.h + 装成 libretro 规范的文件名」。
 // ============================================================================
 
-const CORE_C = &.{ "src/core.c", "src/cart.c", "src/decompress.c", "src/compiler.c" };
+const CORE_C = &.{ "src/core.c", "src/cart.c", "src/decompress.c", "src/compiler.c", "src/cache.c" };
 
-const CORE_TEST_C = &.{ "tests/core_test.c", "src/core.c", "src/cart.c", "src/decompress.c", "src/compiler.c" };
+const CORE_TEST_C = &.{ "tests/core_test.c", "src/core.c", "src/cart.c", "src/decompress.c", "src/compiler.c", "src/cache.c" };
 
-const BTN_TEST_C = &.{ "tests/btn_test.c", "src/core.c", "src/cart.c", "src/decompress.c", "src/compiler.c" };
+const BTN_TEST_C = &.{ "tests/btn_test.c", "src/core.c", "src/cart.c", "src/decompress.c", "src/compiler.c", "src/cache.c" };
 
 const QUICKJS_C = &.{
     "third_party/quickjs/quickjs.c",
@@ -113,9 +113,10 @@ pub fn build(b: *std.Build) void {
     const cart_test = addCartTest(b, target, optimize);
     const core_test = addCoreTest(b, target, optimize, bundle_dir, compiler_dir);
     const btn_test = addBtnTest(b, target, optimize, bundle_dir, compiler_dir);
+    const cache_test = addCacheTest(b, target, optimize);
 
-    const tools_step = b.step("tools", "编译自检程序（cart_test / core_test / btn_test）");
-    for ([_]*std.Build.Step.Compile{ cart_test, core_test, btn_test }) |exe| {
+    const tools_step = b.step("tools", "编译自检程序（cart_test / core_test / btn_test / cache_test）");
+    for ([_]*std.Build.Step.Compile{ cart_test, core_test, btn_test, cache_test }) |exe| {
         const inst = b.addInstallArtifact(exe, .{});
         tools_step.dependOn(&inst.step);
     }
@@ -137,6 +138,12 @@ pub fn build(b: *std.Build) void {
         run.addArg("tests/data/ping.js");
         _ = run.addOutputFileArg("out.ppm");
         run.addArg("90");
+        test_step.dependOn(&run.step);
+    }
+    // 编译缓存单元测试：未命中/命中/截断/篡改/指纹/淘汰。临时目录在 .zig-cache 里，随便丢。
+    {
+        const run = b.addRunArtifact(cache_test);
+        run.addArg(".zig-cache/cache-test");   // 相对项目根（和 tests/data 用的是同一个 cwd）
         test_step.dependOn(&run.step);
     }
     // 端到端：png 卡带当场编译成 binary.js 再跑 90 帧（内嵌编译器那条路）。
@@ -199,9 +206,12 @@ fn defaultPython() []const u8 {
 
 /// 生成 pxt_bundle.h，返回它所在目录（供 #include "pxt_bundle.h"）
 fn genBundle(b: *std.Build, python: []const u8) std.Build.LazyPath {
-    const cmd = b.addSystemCommand(&.{ python, "scripts/gen_bundle.py", "--outdir" });
-    const dir = cmd.addOutputDirectoryArg("gen");
+    // 脚本本身要用 addFileArg 传进去，否则改了脚本 zig 不会重跑这一步（缓存看不见）
+    const cmd = b.addSystemCommand(&.{python});
     cmd.setCwd(b.path("."));
+    cmd.addFileArg(b.path("scripts/gen_bundle.py"));
+    cmd.addArg("--outdir");
+    const dir = cmd.addOutputDirectoryArg("gen");
     return dir;
 }
 
@@ -221,8 +231,9 @@ fn pxtBuildDir(b: *std.Build, override: ?[]const u8) []const u8 {
 /// 生成 pxt_compiler_bundle.h（pxt 编译器载荷），返回它所在目录
 fn genCompilerBundle(b: *std.Build, python: []const u8, pxtbuild: ?[]const u8) std.Build.LazyPath {
     const root = pxtBuildDir(b, pxtbuild);
-    const cmd = b.addSystemCommand(&.{ python, "scripts/gen_compiler_bundle.py" });
+    const cmd = b.addSystemCommand(&.{python});
     cmd.setCwd(b.path("."));
+    cmd.addFileArg(b.path("scripts/gen_compiler_bundle.py"));
     cmd.addArg("--pxt-core");
     cmd.addArg(b.pathJoin(&.{ root, "node_modules", "pxt-core" }));
     cmd.addArg("--pxt-arcade");
@@ -368,6 +379,16 @@ fn addCoreTest(
     mod.addCSourceFiles(.{ .files = QUICKJS_C, .flags = QUICKJS_CFLAGS });
     mod.addCSourceFiles(.{ .files = DECODER_C, .flags = CFLAGS });
     return b.addExecutable(.{ .name = "core_test", .root_module = mod });
+}
+
+fn addCacheTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const mod = baseModule(b, target, optimize, null);
+    mod.addCSourceFiles(.{ .files = &.{ "tests/cache_test.c", "src/cache.c" }, .flags = CFLAGS });
+    return b.addExecutable(.{ .name = "cache_test", .root_module = mod });
 }
 
 fn addBtnTest(

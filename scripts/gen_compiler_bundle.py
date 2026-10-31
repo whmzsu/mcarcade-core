@@ -21,6 +21,7 @@ gen_compiler_bundle.py —— 把 pxt 编译器载荷打包成 C 头文件
                                           --pxt-arcade <node_modules/pxt-arcade>
 """
 import argparse
+import hashlib
 import io
 import lzma
 import os
@@ -98,6 +99,9 @@ def main():
     blobs = []
     raw_total = 0
     comp_total = 0
+    # 编译器指纹：载荷任一字节变了就换一个 id，编译缓存据此自动失效。
+    # 只哈希原始内容（不是 LZMA 后的字节），压缩器升级也不会误伤缓存。
+    digest = hashlib.blake2b(digest_size=8)
     for name in names:
         with open(files[name], "rb") as f:
             data = f.read()
@@ -105,9 +109,13 @@ def main():
         blobs.append((name, hexify(comp), len(data)))
         raw_total += len(data)
         comp_total += len(comp)
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(data)
 
     with io.open(args.runtime, encoding="utf-8") as f:
         glue = f.read()
+    digest.update(glue.encode("utf-8"))
+    compiler_id = digest.hexdigest()
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
@@ -140,6 +148,11 @@ def main():
         o.write("};\n\n")
         o.write("static const unsigned int pxt_compiler_asset_count = %d;\n\n" % len(blobs))
 
+        # 编译器指纹（blake2b-64，16 位十六进制）。编译缓存的文件头里存它，
+        # 换了 pxt 版本或改了胶水，旧缓存自动作废。
+        o.write("/* 载荷指纹，编译缓存靠它失效 */\n")
+        o.write('static const char pxt_compiler_id[] = "%s";\n\n' % compiler_id)
+
         # 胶水本身不大（~23KB），不压缩，省一次解压。
         # 按**原始行**切，转义在切片之后做——否则会把 "\n" 这类转义序列切成两半。
         glue = glue.rstrip("\n") + "\n"     # 统一行尾，长度才好算准
@@ -166,6 +179,7 @@ def main():
     for name, hx, raw in blobs:
         print("  %8d -> %7d  %s" % (raw, len(hx) // 2, name))
     print("glue: %d bytes -> %s" % (len(glue.encode("utf-8")), args.runtime))
+    print("compiler id: %s" % compiler_id)
     print("written: %s" % args.out)
 
 

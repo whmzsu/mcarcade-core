@@ -13,6 +13,12 @@
 int compiler_is_embedded(void);
 
 /*
+ * 编译器指纹（16 位十六进制）。载荷（pxt_hack.js / target.json / 胶水）一变就变，
+ * 编译缓存把它写进文件头，换了编译器旧产物自动作废。没内嵌编译器时返回 "none"。
+ */
+const char *compiler_build_id(void);
+
+/*
  * 编译卡带工程。
  *   proj_json / proj_len : cart_load_png 得到的工程文件表 JSON
  *   out_js / out_len     : 成功时返回 malloc 的 binary.js（NUL 结尾），调用方 free

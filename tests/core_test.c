@@ -56,6 +56,11 @@ static int g_reset_at = -1;
 static int g_every = 0;
 
 /* 可选：--wav=path 把整场音频录成 16bit 单声道 WAV（验证音高/时长用） */
+/* 可选：--cache=DIR 扮演「前端给了存档目录」，让核心启用编译缓存 */
+static const char *g_save_dir = NULL;
+/* 可选：--nocache 把核心选项 arcade_compile_cache 设成 disabled，验证开关真的生效 */
+static int g_cache_off = 0;
+
 static const char *g_wav_path = NULL;
 static short *g_wav = NULL;
 static long g_wav_n = 0, g_wav_cap = 0;
@@ -184,6 +189,19 @@ static bool cb_environment(unsigned cmd, void *data)
         cb->log = core_log;
         return true;
     }
+    /* --cache=DIR 时假装自己有存档目录，用来验证编译缓存（第二次跑应该直接命中） */
+    if (cmd == RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY) {
+        *(const char **)data = g_save_dir;
+        return g_save_dir != NULL;
+    }
+    if (cmd == RETRO_ENVIRONMENT_GET_VARIABLE) {
+        struct retro_variable *v = (struct retro_variable *)data;
+        if (!strcmp(v->key, "arcade_compile_cache")) {
+            v->value = g_cache_off ? "disabled" : "enabled";
+            return true;
+        }
+        return false;
+    }
     return false;
 }
 
@@ -276,6 +294,8 @@ static int run_all(int argc, char **argv)
         else if (!strncmp(argv[i], "--reset-at=", 11)) g_reset_at = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--wav=", 6)) g_wav_path = argv[i] + 6;
         else if (!strncmp(argv[i], "--every=", 8)) g_every = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--cache=", 8)) g_save_dir = argv[i] + 8;
+        else if (!strcmp(argv[i], "--nocache")) g_cache_off = 1;
     }
     size_t len = 0;
     unsigned char *buf = read_file(argv[1], &len);
