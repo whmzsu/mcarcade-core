@@ -35,6 +35,7 @@ FILES = [
     ("arcade_libretro.dll", "arcade_libretro.dll"),
     ("arcade_libretro.so", "arcade_libretro.so"),
     ("arcade_libretro_aarch64.so", "arcade_libretro_aarch64.so"),
+    ("arcade_libretro_a55.so", "arcade_libretro_a55.so"),
     ("arcade_libretro.info", "arcade_libretro.info"),
     ("arcade_libretro_android.so", "android/arcade_libretro.so"),
 ]
