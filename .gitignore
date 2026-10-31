@@ -5,6 +5,8 @@
 zig-out/
 build/
 out/
+# CI 里 PXTBUILD 指向仓库内的这个目录（actions/cache 缓存的 npm 环境）
+.pxtbuild/
 *.o
 *.obj
 *.pdb

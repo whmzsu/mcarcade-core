@@ -1,0 +1,48 @@
+name: 构建环境
+description: >
+  装 Zig（版本 + sha256 双固定，直接下官方 tar.xz）、Node 22，并准备 pxtc 环境
+  （.pxtbuild）。pxtc 走 actions/cache，命中时跳过 npm install。
+
+inputs:
+  zig-version:
+    description: Zig 版本
+    required: false
+    default: "0.17.0"
+  zig-sha256:
+    description: 对应 zig-x86_64-linux-<version>.tar.xz 的 sha256
+    required: false
+    default: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
+
+runs:
+  using: composite
+  steps:
+    - name: 安装 Zig ${{ inputs.zig-version }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        v="${{ inputs.zig-version }}"
+        url="https://ziglang.org/download/${v}/zig-x86_64-linux-${v}.tar.xz"
+        curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
+        # 校验过了再用：CI 里跑的二进制不校验等于给了上游一个后门
+        echo "${{ inputs.zig-sha256 }}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+        tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/zig-x86_64-linux-${v}" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/zig-x86_64-linux-${v}/zig" version
+
+    - name: 安装 Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: 缓存 pxtc 环境
+      id: pxtcache
+      uses: actions/cache@v4
+      with:
+        path: .pxtbuild
+        # setup_pxtc.js 里写死了 pxt-arcade 的版本范围，它变了缓存就该失效
+        key: pxtbuild-${{ runner.os }}-${{ hashFiles('tools/setup_pxtc.js') }}
+
+    - name: 准备 pxtc 环境
+      if: steps.pxtcache.outputs.cache-hit != 'true'
+      shell: bash
+      run: node tools/setup_pxtc.js

@@ -1,0 +1,72 @@
+name: CI
+
+# 两个 job：
+#   test    —— zig build test（PNG 卡带解析 ×4 + ping 90 帧 + ping.png 端到端，1MB 栈）
+#   release —— zig build + zig build release，确认本机与三个交叉目标都编得过（不出包）
+#
+# 为什么 CI 一定要装 pxtc：内嵌编译器的载荷是构建期从 pxt-core/pxt-arcade 抽出来的，
+# 没有它 gen_compiler_bundle.py 就失败，test 里那条 png 端到端也跑不起来。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # setup_pxtc.js 读这个变量决定装到哪；放仓库内方便 actions/cache 缓存
+  PXTBUILD: ${{ github.workspace }}/.pxtbuild
+
+jobs:
+  test:
+    name: 自检（Linux x64）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - name: third_party 是否齐全
+        # 这几个目录是 vendored 的，clone 就该有；缺一个说明仓库被弄坏了
+        run: |
+          for d in quickjs miniz lzma libretro pxt-sim; do
+            test -d "third_party/$d" || { echo "缺少 third_party/$d"; exit 1; }
+          done
+          echo "third_party 齐全"
+
+      - name: zig build test
+        run: zig build test -Dpxtbuild="$PXTBUILD"
+
+  release:
+    name: 发布目标编译（交叉）
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - name: zig build（本机 Linux x64）
+        run: zig build -Dpxtbuild="$PXTBUILD"
+
+      - name: zig build release（交叉）
+        # Windows x64 / Linux x64 / Linux aarch64 三个目标。
+        # Android 要 NDK（几百 MB），CI 跳过；本地 make release -Dndk=... 才出。
+        run: zig build release -Dpxtbuild="$PXTBUILD"
+
+      - name: 检查产物
+        run: |
+          ls -lh zig-out/lib/ zig-out/info/
+          test -f zig-out/lib/arcade_libretro.dll
+          test -f zig-out/lib/arcade_libretro.so
+          test -f zig-out/lib/arcade_libretro_aarch64.so
+          # .info 由 zig build 装（release 不装），RetroArch 要求与 core 同前缀、分目录放
+          test -f zig-out/info/arcade_libretro.info
+          echo "产物齐全"
