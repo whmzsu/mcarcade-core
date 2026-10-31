@@ -79,11 +79,19 @@ static void arc_log(const char *fmt, ...)
  * 核心选项 Performance Stats 打开后，每 120 帧往日志里打一行平均耗时：
  *   perf: step 8.2ms present 1.4ms audio 0.9ms total 10.5ms (budget 16.7)
  * step 是游戏逻辑（JS），present 是取画面+转像素，audio 是合成音频。
+ * 若 native blit 有活动，行尾追加 blit 次数/帧、回退次数和耗时：
+ *   ... blit 85/t fb 0 0.41ms
  * 设备上跑不动时先看这个，能立刻分清是 JS 太慢还是贴图/音频拖后腿。
  */
 static int g_perf_on;
 static double g_perf_step, g_perf_present, g_perf_audio;
 static int g_perf_frames;
+/* native blit 计数（perf 开启时才累计）：ok=走 C 快路，fb=结构不符回退 JS */
+static long g_blit_ok, g_blit_fb;
+static double g_blit_ms;
+
+/* 当前卡带名（取 game->path 的文件名），日志里标识是哪个游戏 */
+static char g_cart_name[80];
 
 static double perf_now_ms(void)
 {
@@ -104,10 +112,19 @@ static void perf_flush(void)
 {
     if (g_perf_frames <= 0) return;
     double n = (double)g_perf_frames;
-    arc_log("perf: step %.1fms present %.1fms audio %.1fms total %.1fms (budget 16.7)",
-            g_perf_step / n, g_perf_present / n, g_perf_audio / n,
-            (g_perf_step + g_perf_present + g_perf_audio) / n);
+    if (g_blit_ok || g_blit_fb)
+        arc_log("perf: step %.1fms present %.1fms audio %.1fms total %.1fms (budget 16.7) "
+                "blit %ld/t fb %ld %.2fms",
+                g_perf_step / n, g_perf_present / n, g_perf_audio / n,
+                (g_perf_step + g_perf_present + g_perf_audio) / n,
+                g_blit_ok / (long)n, g_blit_fb / (long)n, g_blit_ms / n);
+    else
+        arc_log("perf: step %.1fms present %.1fms audio %.1fms total %.1fms (budget 16.7)",
+                g_perf_step / n, g_perf_present / n, g_perf_audio / n,
+                (g_perf_step + g_perf_present + g_perf_audio) / n);
     g_perf_step = g_perf_present = g_perf_audio = 0;
+    g_blit_ok = g_blit_fb = 0;
+    g_blit_ms = 0;
     g_perf_frames = 0;
 }
 
@@ -269,7 +286,7 @@ static int img_int_of(JSContext *ctx, JSValueConst img, const char *key)
     return v;
 }
 
-static JSValue js_native_blit(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+static JSValue js_native_blit_impl(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     (void)this_val;
     /* argv: dst, src, x, y, clear —— 语义与 sim.js drawImageCore 一致
@@ -311,6 +328,20 @@ static JSValue js_native_blit(JSContext *ctx, JSValueConst this_val, int argc, J
                 if (s[c]) d[c] = s[c];
     }
     return JS_NewInt32(ctx, 1);
+}
+
+/* 带 perf 计数的包装：Performance Stats 关闭时除一次自增计数外零开销 */
+static JSValue js_native_blit(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    if (!g_perf_on)
+        return js_native_blit_impl(ctx, this_val, argc, argv);
+    double t0 = perf_now_ms();
+    JSValue r = js_native_blit_impl(ctx, this_val, argc, argv);
+    g_blit_ms += perf_now_ms() - t0;
+    int v = -1;
+    JS_ToInt32(ctx, &v, r);
+    if (v < 0) g_blit_fb++; else g_blit_ok++;
+    return r;
 }
 
 /* ---------------- 初始化 ---------------- */
@@ -587,7 +618,7 @@ EXPORT void retro_get_system_info(struct retro_system_info *info)
 {
     memset(info, 0, sizeof(*info));
     info->library_name = "MakeCode Arcade (official runtime)";
-    info->library_version = "0.15";
+    info->library_version = "0.15.1";
     info->valid_extensions = "js|png";
     info->need_fullpath = false;
     info->block_extract = true;
@@ -669,6 +700,15 @@ EXPORT bool retro_load_game(const struct retro_game_info *game)
 
     free(g_source);
     g_source = NULL;
+
+    /* 记下卡带文件名，日志/性能统计里标识是哪个游戏 */
+    g_cart_name[0] = 0;
+    if (game->path && game->path[0]) {
+        const char *base = strrchr(game->path, '/');
+        const char *p2 = strrchr(game->path, '\\');
+        if (p2 > base) base = p2;
+        snprintf(g_cart_name, sizeof(g_cart_name), "%s", base ? base + 1 : game->path);
+    }
 
     if (looks_like_png((const unsigned char *)game->data, game->size)) {
         /* ---- png 卡带：当场编译 ---- */
@@ -769,7 +809,10 @@ EXPORT bool retro_load_game(const struct retro_game_info *game)
         return false;
     }
     g_loaded = 1;
-    arc_log("game booted");
+    if (g_cart_name[0])
+        arc_log("game booted: %s", g_cart_name);
+    else
+        arc_log("game booted");
     return true;
 }
 
